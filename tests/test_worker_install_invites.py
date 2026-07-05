@@ -53,6 +53,9 @@ def test_admin_creates_macos_worker_install_invite_without_exposing_secret(
     assert invite["package_sha256"] in script.text
     assert "sha256sum" in script.text or "shasum -a 256" in script.text
     assert "env_file.chmod(0o600)" in script.text
+    assert '-name "__pycache__"' in script.text
+    assert '-name "*.pyc"' in script.text
+    assert '-name "*.py" -exec touch' in script.text
 
 
 def test_admin_creates_windows_worker_install_invite(monkeypatch, tmp_path):
@@ -94,6 +97,9 @@ def test_admin_creates_windows_worker_install_invite(monkeypatch, tmp_path):
     assert "python -m venv .venv" not in script.text
     assert "Test-Path $PythonRuntime" in script.text
     assert 'Invoke-Native $PythonRuntime @("-m", "pip", "install", "--upgrade", "pip")' in script.text
+    assert 'Filter "__pycache__"' in script.text
+    assert 'Filter "*.pyc"' in script.text
+    assert "LastWriteTimeUtc" in script.text
 
 
 def test_worker_install_invite_rejects_blank_worker_id(monkeypatch, tmp_path):

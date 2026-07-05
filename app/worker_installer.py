@@ -132,6 +132,9 @@ chmod 700 "$INSTALL_DIR/current" 2>/dev/null || true
 tar -xzf "$TMP_DIR/cloudlink-worker.tar.gz" -C "$INSTALL_DIR/current" --strip-components=1
 
 cd "$INSTALL_DIR/current"
+find . -type d -name "__pycache__" -exec rm -rf {{}} + 2>/dev/null || true
+find . -type f -name "*.pyc" -delete 2>/dev/null || true
+find . -type f -name "*.py" -exec touch {{}} +
 "$PYTHON_BIN" -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
@@ -289,6 +292,13 @@ New-Item -ItemType Directory -Force -Path $Current | Out-Null
 Invoke-Native "tar" @("-xzf", $Archive, "-C", $Current, "--strip-components=1")
 
 Set-Location $Current
+Get-ChildItem -Path $Current -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+  Remove-Item -Recurse -Force
+Get-ChildItem -Path $Current -Recurse -File -Filter "*.pyc" -ErrorAction SilentlyContinue |
+  Remove-Item -Force
+$PythonSourceTimestamp = [DateTime]::UtcNow
+Get-ChildItem -Path $Current -Recurse -File -Filter "*.py" -ErrorAction SilentlyContinue |
+  ForEach-Object {{ $_.LastWriteTimeUtc = $PythonSourceTimestamp }}
 $PythonCommand = @(Resolve-PythonCommand)
 $PythonExecutable = $PythonCommand[0]
 $PythonArgs = @()

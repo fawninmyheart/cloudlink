@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026.07.06.7
+
+### Installer
+
+- Fixed worker updates on macOS and Windows so freshly extracted Python source
+  files get current mtimes and stale `__pycache__`/`.pyc` files are removed.
+  This prevents Python from reusing old bytecode when a new worker package has
+  fixed archive timestamps and same-length version strings.
+
+### Compatibility
+
+- Server version: `2026.07.06.7`.
+- Minimum supported worker version remains `2026.07.06.3`.
+
 ## 2026.07.06.6
 
 ### Reliability
