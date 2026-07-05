@@ -1615,6 +1615,11 @@ def dashboard_html() -> str:
       const workerId = document.getElementById("worker-install-id").value.trim();
       const displayName = document.getElementById("worker-install-name").value.trim();
       const button = document.getElementById("worker-install-generate");
+      if (!workerId) {
+        showNotice("请先填写节点 ID，再生成安装命令。");
+        document.getElementById("worker-install-id").focus();
+        return;
+      }
       button.disabled = true;
       try {
         const response = await fetch("/api/admin/worker-install-invites", {

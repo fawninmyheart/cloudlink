@@ -88,10 +88,26 @@ def test_admin_creates_windows_worker_install_invite(monkeypatch, tmp_path):
     assert "\"Include_launcher=0\"" in script.text
     assert "Test-PythonCommand \"py\"" not in script.text
     assert "Test-PythonCommand \"python\"" not in script.text
+    assert "[Parameter(Mandatory = $true)][string[]]$PrefixArguments" not in script.text
+    assert "Test-PythonCommand $CloudlinkPythonExe @()" in script.text
     assert "$LASTEXITCODE -eq 0" in script.text
     assert "python -m venv .venv" not in script.text
     assert "Test-Path $PythonRuntime" in script.text
     assert 'Invoke-Native $PythonRuntime @("-m", "pip", "install", "--upgrade", "pip")' in script.text
+
+
+def test_worker_install_invite_rejects_blank_worker_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLOUDLINK_PUBLIC_BASE_URL", "https://tasks.example.test")
+    client = make_client(monkeypatch, tmp_path)
+
+    response = client.post(
+        "/api/admin/worker-install-invites",
+        auth=admin_auth(),
+        json={"platform": "windows", "worker_id": "   ", "display_name": ""},
+    )
+
+    assert response.status_code == 400
+    assert "worker_id" in response.json()["detail"]
 
 
 def test_worker_install_invite_rejects_public_http_base_url_by_default(
@@ -258,6 +274,8 @@ def test_dashboard_exposes_password_and_worker_install_controls():
     assert "获取部署命令" in text
     assert "inferWorkerInstallPlatform" in text
     assert "openWorkerInstallModal(button.dataset.openWorkerInstallCommand)" in text
+    assert "请先填写节点 ID" in text
+    assert "worker-install-id" in text
     assert "/api/admin/password" in text
     assert "/api/admin/worker-install-invites" in text
 

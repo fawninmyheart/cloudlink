@@ -48,9 +48,11 @@ def create_worker_install_invite(
     normalized_platform = platform.strip().lower()
     if normalized_platform not in VALID_INSTALL_PLATFORMS:
         raise WorkerInstallInviteError("platform must be macos, linux, or windows")
+    resolved_worker_id = (worker_id or "").strip()
+    if not resolved_worker_id:
+        raise WorkerInstallInviteError("worker_id is required")
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
-    resolved_worker_id = (worker_id or "").strip() or f"worker-{token[:8]}"
     resolved_display_name = (display_name or "").strip() or resolved_worker_id
     conn.execute(
         """

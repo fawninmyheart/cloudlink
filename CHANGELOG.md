@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026.07.06.2
+
+### Installer
+
+- Fixed the generated Windows worker installer so its private Python runtime
+  probe accepts an empty prefix-argument list. This avoids PowerShell's
+  `PrefixArguments` empty-array binding error when probing Cloudlink's private
+  `python.exe`.
+
+### Dashboard
+
+- Worker install invites now require an explicit worker ID. The dashboard shows
+  a Chinese validation prompt before submitting, and the backend rejects blank
+  `worker_id` values instead of silently generating `worker-<token>`.
+
+### Compatibility
+
+- Server version: `2026.07.06.2`.
+- Minimum supported worker version remains `2026.07.05.6`.
+
 ## 2026.07.06.1
 
 ### Installer

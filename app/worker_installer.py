@@ -230,7 +230,7 @@ function Invoke-Installer {{
 function Test-PythonCommand {{
   param(
     [Parameter(Mandatory = $true)][string]$FilePath,
-    [Parameter(Mandatory = $true)][string[]]$PrefixArguments
+    [string[]]$PrefixArguments = @()
   )
   if (-not (Get-Command $FilePath -ErrorAction SilentlyContinue)) {{
     return $false
