@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026.07.05.8
+
+### Reliability
+
+- Made worker artifact record creation idempotent for repeated
+  same-task/same-path/same-content requests, so a worker retry after a lost
+  create response can continue uploading instead of failing the task with `409
+  Conflict`.
+- Kept conflicting same-path artifact metadata as `409 Conflict` so changed
+  output content is still rejected instead of silently reusing the wrong result.
+
+### Compatibility
+
+- Server version: `2026.07.05.8`.
+- Minimum supported worker version remains `2026.07.05.6`.
+
 ## 2026.07.05.7
 
 ### Security

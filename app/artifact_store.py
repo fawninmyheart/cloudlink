@@ -56,6 +56,23 @@ def get_artifact(conn: sqlite3.Connection, artifact_id: str) -> Dict[str, Any]:
     return artifact_to_dict(row)
 
 
+def get_artifact_for_task_path(
+    conn: sqlite3.Connection,
+    task_id: str,
+    relative_path: str,
+) -> Dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT * FROM task_artifacts
+        WHERE task_id = ? AND relative_path = ?
+        """,
+        (task_id, str(safe_relative_path(relative_path))),
+    ).fetchone()
+    if row is None:
+        raise ArtifactNotFound(relative_path)
+    return artifact_to_dict(row)
+
+
 def list_task_artifacts(
     conn: sqlite3.Connection,
     task_id: str,
@@ -119,6 +136,19 @@ def create_artifact_record(
         / display_name
     )
     now = utc_now()
+    artifact_values = {
+        "worker_id": worker_id,
+        "lease_id": lease_id,
+        "relative_path": str(safe_path),
+        "display_name": display_name,
+        "title": title or display_name,
+        "description": description or "",
+        "meaning": meaning or "",
+        "content_type": content_type,
+        "size_bytes": int(size_bytes),
+        "sha256": sha256,
+        "required": 1 if required else 0,
+    }
     try:
         conn.execute(
             """
@@ -132,23 +162,39 @@ def create_artifact_record(
             (
                 artifact_id,
                 task_id,
-                worker_id,
-                lease_id,
-                str(safe_path),
-                display_name,
-                title or display_name,
-                description or "",
-                meaning or "",
-                content_type,
-                int(size_bytes),
-                sha256,
+                artifact_values["worker_id"],
+                artifact_values["lease_id"],
+                artifact_values["relative_path"],
+                artifact_values["display_name"],
+                artifact_values["title"],
+                artifact_values["description"],
+                artifact_values["meaning"],
+                artifact_values["content_type"],
+                artifact_values["size_bytes"],
+                artifact_values["sha256"],
                 str(storage_path),
-                1 if required else 0,
+                artifact_values["required"],
                 now,
                 now,
             ),
         )
     except sqlite3.IntegrityError as exc:
+        existing = get_artifact_for_task_path(conn, task_id, str(safe_path))
+        matching_keys = (
+            "worker_id",
+            "lease_id",
+            "relative_path",
+            "display_name",
+            "title",
+            "description",
+            "meaning",
+            "content_type",
+            "size_bytes",
+            "sha256",
+            "required",
+        )
+        if all(existing[key] == artifact_values[key] for key in matching_keys):
+            return existing
         raise ArtifactConflict(str(exc)) from exc
     return get_artifact(conn, artifact_id)
 

@@ -145,6 +145,77 @@ def test_worker_uploads_artifact_for_owned_task(monkeypatch, tmp_path):
     assert retry_upload.json()["status"] == "uploaded"
 
 
+def test_worker_artifact_create_is_idempotent_for_same_file(monkeypatch, tmp_path):
+    client = make_client(monkeypatch, tmp_path)
+    register_worker(client)
+    task = claim_script_task(client)
+    content = b"alpha,beta\n1,2\n"
+    digest = hashlib.sha256(content).hexdigest()
+    payload = {
+        "worker_id": "worker-a",
+        "lease_id": task["lease_id"],
+        "relative_path": "result.csv",
+        "title": "Result CSV",
+        "description": "Detailed rows.",
+        "meaning": "Use this for follow-up analysis.",
+        "content_type": "text/csv",
+        "size_bytes": len(content),
+        "sha256": digest,
+        "required": True,
+    }
+
+    first = client.post(
+        f"/api/worker/tasks/{task['id']}/artifacts",
+        headers=worker_headers(),
+        json=payload,
+    )
+    retry = client.post(
+        f"/api/worker/tasks/{task['id']}/artifacts",
+        headers=worker_headers(),
+        json=payload,
+    )
+
+    assert first.status_code == 200
+    assert retry.status_code == 200
+    assert retry.json()["id"] == first.json()["id"]
+    assert retry.json()["relative_path"] == "result.csv"
+
+
+def test_worker_artifact_create_conflicts_for_same_path_different_content(
+    monkeypatch,
+    tmp_path,
+):
+    client = make_client(monkeypatch, tmp_path)
+    register_worker(client)
+    task = claim_script_task(client)
+    content = b"alpha,beta\n1,2\n"
+    payload = {
+        "worker_id": "worker-a",
+        "lease_id": task["lease_id"],
+        "relative_path": "result.csv",
+        "size_bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+    first = client.post(
+        f"/api/worker/tasks/{task['id']}/artifacts",
+        headers=worker_headers(),
+        json=payload,
+    )
+    conflicting = client.post(
+        f"/api/worker/tasks/{task['id']}/artifacts",
+        headers=worker_headers(),
+        json={
+            **payload,
+            "size_bytes": len(content) + 1,
+            "sha256": hashlib.sha256(content + b"x").hexdigest(),
+        },
+    )
+
+    assert first.status_code == 200
+    assert conflicting.status_code == 409
+
+
 def test_worker_uploads_artifact_in_resumable_chunks(monkeypatch, tmp_path):
     client = make_client(monkeypatch, tmp_path)
     register_worker(client)
