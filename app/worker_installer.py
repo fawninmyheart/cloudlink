@@ -197,6 +197,27 @@ if (-not $InstallDir) {{
 $Current = Join-Path $InstallDir "current"
 $Archive = Join-Path $env:TEMP "cloudlink-worker.tar.gz"
 
+function Invoke-Native {{
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [Parameter(Mandatory = $true)][string[]]$Arguments
+  )
+  & $FilePath @Arguments
+  if ($LASTEXITCODE -ne 0) {{
+    throw "$FilePath failed with exit code $LASTEXITCODE"
+  }}
+}}
+
+function Resolve-PythonCommand {{
+  if (Get-Command py -ErrorAction SilentlyContinue) {{
+    return @("py", "-3")
+  }}
+  if (Get-Command python -ErrorAction SilentlyContinue) {{
+    return @("python")
+  }}
+  throw "Python 3 was not found. Install Python 3 and rerun the Cloudlink worker installer."
+}}
+
 New-Item -ItemType Directory -Force -Path $Current | Out-Null
 Invoke-WebRequest -Uri "$BaseUrl/install/worker/$Token/package.tar.gz" -OutFile $Archive
 $ActualSha256 = (Get-FileHash -Algorithm SHA256 -Path $Archive).Hash.ToLowerInvariant()
@@ -205,13 +226,22 @@ if ($ActualSha256 -ne $ExpectedSha256) {{
 }}
 Remove-Item -Recurse -Force $Current
 New-Item -ItemType Directory -Force -Path $Current | Out-Null
-tar -xzf $Archive -C $Current --strip-components=1
+Invoke-Native "tar" @("-xzf", $Archive, "-C", $Current, "--strip-components=1")
 
 Set-Location $Current
-python -m venv .venv
+$PythonCommand = @(Resolve-PythonCommand)
+$PythonExecutable = $PythonCommand[0]
+$PythonArgs = @()
+if ($PythonCommand.Count -gt 1) {{
+  $PythonArgs = $PythonCommand[1..($PythonCommand.Count - 1)]
+}}
+Invoke-Native $PythonExecutable ($PythonArgs + @("-m", "venv", ".venv"))
 $PythonRuntime = Join-Path $Current ".venv\\Scripts\\python.exe"
-& $PythonRuntime -m pip install --upgrade pip
-& $PythonRuntime -m pip install -r requirements.txt
+if (-not (Test-Path $PythonRuntime)) {{
+  throw "Cloudlink worker Python runtime was not created at $PythonRuntime. Install Python 3 with venv support and rerun the installer."
+}}
+Invoke-Native $PythonRuntime @("-m", "pip", "install", "--upgrade", "pip")
+Invoke-Native $PythonRuntime @("-m", "pip", "install", "-r", "requirements.txt")
 
 $Registration = Invoke-RestMethod `
   -Method Post `
@@ -221,7 +251,7 @@ $Registration = Invoke-RestMethod `
 
 $EnvPath = Join-Path $Current "scripts\\local_worker.env"
 Set-Content -Path $EnvPath -Value $Registration.env -Encoding UTF8
-icacls $EnvPath /inheritance:r /grant:r "${{env:USERNAME}}:(R,W)" | Out-Null
+Invoke-Native "icacls" @($EnvPath, "/inheritance:r", "/grant:r", "${{env:USERNAME}}:(R,W)") | Out-Null
 
 $Registration.env -split "`n" | ForEach-Object {{
   if ($_ -match "^([^=]+)=(.*)$") {{

@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026.07.05.9
+
+### Installer
+
+- Hardened the generated Windows worker installer so it resolves `py -3` or
+  `python`, checks native command exit codes, verifies that
+  `.venv\Scripts\python.exe` was created, and reports a clear Python/venv setup
+  error instead of continuing until PowerShell fails to invoke a missing venv
+  runtime.
+
+### Compatibility
+
+- Server version: `2026.07.05.9`.
+- Minimum supported worker version remains `2026.07.05.6`.
+
 ## 2026.07.05.8
 
 ### Reliability
