@@ -340,6 +340,40 @@ def test_overview_uses_configured_reserve_for_display(monkeypatch, tmp_path):
     assert worker["reported_hardware_profile"]["reserve"]["cpu_cores"] == 2
 
 
+def test_overview_recomputes_cpu_capacity_when_configured_reserve_decreases(
+    monkeypatch,
+    tmp_path,
+):
+    client = make_client(monkeypatch, tmp_path)
+    client.post(
+        "/api/internal/workers",
+        headers=internal_headers(),
+        json=resource_worker_payload(),
+    )
+
+    response = client.patch(
+        "/api/admin/workers/worker-a/settings",
+        auth=("admin", "admin-pass"),
+        json={
+            "max_concurrent_tasks": 1,
+            "reserve_overrides": {
+                "cpu_cores": 1,
+                "memory_bytes": 8 * GIB,
+                "job_disk_bytes": 50 * GIB,
+                "dataset_disk_bytes": 50 * GIB,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    overview = client.get("/api/admin/overview", auth=("admin", "admin-pass")).json()
+    worker = overview["workers"][0]
+    assert worker["hardware_profile"]["scheduler"]["cpu_cores"] == 9
+    assert worker["capacity_state"]["cpu_cores"] == 9
+    assert worker["reserved_resources"]["cpu_cores"] == 0
+    assert worker["reported_capacity_state"]["cpu_cores"] == 8
+
+
 def test_old_workers_cannot_claim_zero_resource_tasks(monkeypatch, tmp_path):
     client = make_client(monkeypatch, tmp_path)
     register_worker(

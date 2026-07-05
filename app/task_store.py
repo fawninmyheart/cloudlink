@@ -896,8 +896,8 @@ def worker_current_capacity(worker: Dict[str, Any]) -> Dict[str, Any]:
     ideal = worker_ideal_capacity(worker)
     state = worker.get("capacity_state") or {}
     capacity: Dict[str, Any] = {"gpu_devices": state.get("gpu_devices") or ideal.get("gpu_devices") or []}
+    capacity["cpu_cores"] = _whole_cpu_capacity(ideal.get("cpu_cores"))
     aliases = {
-        "cpu_cores": ("cpu_cores_available",),
         "memory_bytes": ("memory_available_bytes",),
         "job_disk_bytes": ("job_disk_free_bytes",),
         "dataset_disk_bytes": ("dataset_disk_free_bytes",),
@@ -911,9 +911,7 @@ def worker_current_capacity(worker: Dict[str, Any]) -> Dict[str, Any]:
             capacity[key] = state_value
         else:
             capacity[key] = min(float(state_value), float(ideal_value))
-        if key == "cpu_cores":
-            capacity[key] = _whole_cpu_capacity(capacity.get(key))
-        elif capacity.get(key) is not None:
+        if capacity.get(key) is not None:
             capacity[key] = int(capacity[key])
     return capacity
 
@@ -985,6 +983,8 @@ def worker_with_running_resource_summary(
     worker = worker_with_configured_resource_view(worker)
     capacity = dict(worker.get("capacity_state") or {})
     scheduler = (worker.get("hardware_profile") or {}).get("scheduler") or {}
+    if scheduler.get("cpu_cores") is not None:
+        capacity["cpu_cores"] = _whole_cpu_capacity(scheduler.get("cpu_cores"))
     for key in ("cpu_cores", "memory_bytes", "job_disk_bytes", "dataset_disk_bytes"):
         if capacity.get(key) is not None and scheduler.get(key) is not None:
             capacity[key] = min(int(capacity[key]), int(scheduler[key]))
