@@ -5,6 +5,7 @@ from worker.hardware import (
     build_capacity_state,
     build_runtime_profile,
     collect_worker_profiles,
+    detect_available_memory_bytes,
     detect_total_memory_bytes,
 )
 
@@ -150,6 +151,18 @@ def test_detect_total_memory_uses_sysconf_fallback(monkeypatch):
     )
 
     assert detect_total_memory_bytes() == 409600
+
+
+def test_windows_memory_detection_uses_global_memory_status(monkeypatch):
+    monkeypatch.setattr("worker.hardware.sys.platform", "win32")
+    monkeypatch.setattr(
+        "worker.hardware._windows_memory_status",
+        lambda: (32 * 1024**3, 20 * 1024**3),
+        raising=False,
+    )
+
+    assert detect_total_memory_bytes() == 32 * 1024**3
+    assert detect_available_memory_bytes() == 20 * 1024**3
 
 
 def test_disk_usage_returns_zero_for_invalid_path(tmp_path):

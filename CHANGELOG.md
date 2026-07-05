@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026.07.06.3
+
+### Worker
+
+- Fixed Windows worker hardware detection so memory total and available memory
+  are collected through the Windows `GlobalMemoryStatusEx` API instead of
+  falling back to POSIX `sysconf`. Windows nodes no longer report `0 B` memory
+  after installation.
+
+### Compatibility
+
+- Server version: `2026.07.06.3`.
+- Minimum supported worker version: `2026.07.06.3`.
+- Existing workers below the minimum must be updated from the dashboard before
+  they can claim new tasks.
+
 ## 2026.07.06.2
 
 ### Installer

@@ -2,8 +2,8 @@ import re
 from typing import Optional
 
 
-CLOUDLINK_VERSION = "2026.07.06.2"
-MINIMUM_WORKER_VERSION = "2026.07.05.6"
+CLOUDLINK_VERSION = "2026.07.06.3"
+MINIMUM_WORKER_VERSION = "2026.07.06.3"
 
 
 def numeric_version_parts(value: str) -> Optional[tuple[int, ...]]:
