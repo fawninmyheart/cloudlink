@@ -15,7 +15,8 @@ RSYNC_ARGS=(
   --delete
   --exclude "/.git/***"
   --exclude "/.venv/***"
-  --exclude "/__pycache__/***"
+  --exclude "__pycache__/***"
+  --exclude "*.pyc"
   --exclude "/.pytest_cache/***"
   --exclude "/.DS_Store"
   --exclude "/data/***"

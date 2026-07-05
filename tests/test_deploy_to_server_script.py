@@ -24,3 +24,5 @@ def test_deploy_script_protects_runtime_state_in_dry_run():
     assert "/.codex-token" in output
     assert "/scripts/local_worker.env" in output
     assert "/.venv/***" in output
+    assert "__pycache__/***" in output
+    assert "*.pyc" in output
