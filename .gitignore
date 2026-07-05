@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+cloudlink_tasks.db
+cloudlink_tasks.db-*
+e2e_tasks.db
+e2e_tasks.db-*
+data/
+scripts/local_worker.env
+docs/superpowers/
