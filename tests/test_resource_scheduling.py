@@ -307,6 +307,41 @@ def test_overview_worker_capacity_subtracts_running_task_reservations(monkeypatc
     assert worker["reserved_resources"]["memory_bytes"] == 12 * GIB
 
 
+def test_overview_ignores_expired_running_task_reservations(monkeypatch, tmp_path):
+    client = make_client(monkeypatch, tmp_path)
+    client.post(
+        "/api/internal/workers",
+        headers=internal_headers(),
+        json=resource_worker_payload(max_concurrent=2),
+    )
+    create_script_job(client, {"cpu_cores": 3, "memory_bytes": 12 * GIB})
+
+    claim = client.post(
+        "/api/worker/claim",
+        headers=worker_headers(),
+        json={"worker_id": "worker-a", "supported_types": ["script_job"]},
+    )
+
+    assert claim.status_code == 200
+    task_id = claim.json()["task"]["id"]
+    with sqlite3.connect(tmp_path / "tasks.db") as conn:
+        conn.execute(
+            """
+            UPDATE tasks
+            SET locked_until = '2000-01-01T00:00:00+00:00'
+            WHERE id = ?
+            """,
+            (task_id,),
+        )
+
+    overview = client.get("/api/admin/overview", auth=("admin", "admin-pass")).json()
+    worker = overview["workers"][0]
+    assert worker["capacity_state"]["cpu_cores"] == 8
+    assert worker["capacity_state"]["memory_bytes"] == 56 * GIB
+    assert worker["reserved_resources"]["cpu_cores"] == 0
+    assert worker["reserved_resources"]["memory_bytes"] == 0
+
+
 def test_overview_uses_configured_reserve_for_display(monkeypatch, tmp_path):
     client = make_client(monkeypatch, tmp_path)
     client.post(

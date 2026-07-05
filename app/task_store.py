@@ -922,6 +922,7 @@ def subtract_running_reservations(
     capacity: Dict[str, Any],
 ) -> Dict[str, Any]:
     adjusted = dict(capacity)
+    now = utc_now()
     rows = conn.execute(
         """
         SELECT resource_reservation
@@ -929,8 +930,9 @@ def subtract_running_reservations(
         WHERE status = 'running'
           AND locked_by = ?
           AND resource_reservation IS NOT NULL
+          AND (locked_until IS NULL OR locked_until > ?)
         """,
-        (worker_id,),
+        (worker_id, now),
     ).fetchall()
     for row in rows:
         reservation = json.loads(row["resource_reservation"])
@@ -941,9 +943,16 @@ def subtract_running_reservations(
 
 
 def running_task_count(conn: sqlite3.Connection, worker_id: str) -> int:
+    now = utc_now()
     row = conn.execute(
-        "SELECT COUNT(*) AS count FROM tasks WHERE status = 'running' AND locked_by = ?",
-        (worker_id,),
+        """
+        SELECT COUNT(*) AS count
+        FROM tasks
+        WHERE status = 'running'
+          AND locked_by = ?
+          AND (locked_until IS NULL OR locked_until > ?)
+        """,
+        (worker_id, now),
     ).fetchone()
     return int(row["count"])
 
@@ -952,6 +961,7 @@ def running_resource_totals(
     conn: sqlite3.Connection,
     worker_id: str,
 ) -> Dict[str, Any]:
+    now = utc_now()
     totals = {
         "cpu_cores": 0,
         "memory_bytes": 0,
@@ -965,8 +975,9 @@ def running_resource_totals(
         WHERE status = 'running'
           AND locked_by = ?
           AND resource_reservation IS NOT NULL
+          AND (locked_until IS NULL OR locked_until > ?)
         """,
-        (worker_id,),
+        (worker_id, now),
     ).fetchall()
     for row in rows:
         reservation = json.loads(row["resource_reservation"])

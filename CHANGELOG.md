@@ -1,6 +1,6 @@
 # Changelog
 
-## 2026.07.06.4
+## 2026.07.06.5
 
 ### Dashboard
 
@@ -9,10 +9,12 @@
   configured reserve view as the displayed CPU limit, then subtracts running
   task reservations, so idle workers show values such as `10 / 10` instead of
   stale mixed values such as `9 / 10`.
+- Expired running task locks are no longer counted as active resource
+  reservations in overview capacity cards.
 
 ### Compatibility
 
-- Server version: `2026.07.06.4`.
+- Server version: `2026.07.06.5`.
 - Minimum supported worker version remains `2026.07.06.3`.
 
 ## 2026.07.06.3

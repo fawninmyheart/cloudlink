@@ -2,7 +2,7 @@ import re
 from typing import Optional
 
 
-CLOUDLINK_VERSION = "2026.07.06.4"
+CLOUDLINK_VERSION = "2026.07.06.5"
 MINIMUM_WORKER_VERSION = "2026.07.06.3"
 
 
