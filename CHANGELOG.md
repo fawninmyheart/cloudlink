@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026.07.06.6
+
+### Reliability
+
+- Fixed intermittent `500 Internal Server Error` responses caused by SQLite's
+  same-thread check when FastAPI dependency cleanup closed a per-request
+  database connection from a different worker thread.
+
+### Compatibility
+
+- Server version: `2026.07.06.6`.
+- Minimum supported worker version remains `2026.07.06.3`.
+
 ## 2026.07.06.5
 
 ### Dashboard

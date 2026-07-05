@@ -205,6 +205,7 @@ def connect() -> sqlite3.Connection:
         get_settings().database_path,
         timeout=30,
         isolation_level=None,
+        check_same_thread=False,
     )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
