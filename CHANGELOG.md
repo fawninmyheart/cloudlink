@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026.07.06.1
+
+### Installer
+
+- Windows worker installs now bootstrap a Cloudlink-private Python 3.12.10
+  runtime under the worker install directory when the runtime is missing. The
+  generated script downloads the official Python installer over HTTPS, verifies
+  its SHA256 checksum, installs it without modifying system `PATH`, and uses
+  that private runtime to create the worker virtualenv.
+
+### Compatibility
+
+- Server version: `2026.07.06.1`.
+- Minimum supported worker version remains `2026.07.05.6`.
+
 ## 2026.07.05.10
 
 ### Installer

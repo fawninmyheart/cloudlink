@@ -195,7 +195,15 @@ if (-not $InstallDir) {{
   $InstallDir = Join-Path $env:LOCALAPPDATA "Cloudlink\\worker"
 }}
 $Current = Join-Path $InstallDir "current"
+$RuntimeRoot = Join-Path $InstallDir "runtime"
+$CloudlinkPythonVersion = "3.12.10"
+$CloudlinkPythonInstallerName = "python-3.12.10-amd64.exe"
+$CloudlinkPythonInstallerUrl = "https://www.python.org/ftp/python/$CloudlinkPythonVersion/$CloudlinkPythonInstallerName"
+$CloudlinkPythonInstallerSha256 = "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb"
+$CloudlinkPythonHome = Join-Path $RuntimeRoot "python-$CloudlinkPythonVersion"
+$CloudlinkPythonExe = Join-Path $CloudlinkPythonHome "python.exe"
 $Archive = Join-Path $env:TEMP "cloudlink-worker.tar.gz"
+$CloudlinkPythonInstaller = Join-Path $env:TEMP $CloudlinkPythonInstallerName
 
 function Invoke-Native {{
   param(
@@ -205,6 +213,17 @@ function Invoke-Native {{
   & $FilePath @Arguments
   if ($LASTEXITCODE -ne 0) {{
     throw "$FilePath failed with exit code $LASTEXITCODE"
+  }}
+}}
+
+function Invoke-Installer {{
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [Parameter(Mandatory = $true)][string[]]$Arguments
+  )
+  $Process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -Wait -PassThru
+  if ($Process.ExitCode -ne 0) {{
+    throw "$FilePath failed with exit code $($Process.ExitCode)"
   }}
 }}
 
@@ -220,14 +239,43 @@ function Test-PythonCommand {{
   return $LASTEXITCODE -eq 0
 }}
 
+function Install-CloudlinkPythonRuntime {{
+  if (-not [Environment]::Is64BitOperatingSystem) {{
+    throw "Cloudlink automatic Python install currently requires 64-bit Windows. Install Python 3 manually and rerun the worker installer."
+  }}
+  New-Item -ItemType Directory -Force -Path $RuntimeRoot | Out-Null
+  Write-Host "Installing Cloudlink private Python $CloudlinkPythonVersion..."
+  Invoke-WebRequest -Uri $CloudlinkPythonInstallerUrl -OutFile $CloudlinkPythonInstaller
+  $PythonInstallerSha256 = (Get-FileHash -Algorithm SHA256 -Path $CloudlinkPythonInstaller).Hash.ToLowerInvariant()
+  if ($PythonInstallerSha256 -ne $CloudlinkPythonInstallerSha256) {{
+    throw "Cloudlink private Python installer checksum mismatch."
+  }}
+  if (Test-Path $CloudlinkPythonHome) {{
+    Remove-Item -Recurse -Force $CloudlinkPythonHome
+  }}
+  $InstallerArguments = @(
+    "/quiet",
+    "InstallAllUsers=0",
+    "TargetDir=`"$CloudlinkPythonHome`"",
+    "PrependPath=0",
+    "Include_pip=1",
+    "Include_launcher=0",
+    "InstallLauncherAllUsers=0",
+    "AssociateFiles=0",
+    "Shortcuts=0",
+    "Include_test=0"
+  )
+  Invoke-Installer $CloudlinkPythonInstaller $InstallerArguments
+  if (-not (Test-PythonCommand $CloudlinkPythonExe @())) {{
+    throw "Cloudlink private Python runtime was not created at $CloudlinkPythonExe."
+  }}
+}}
+
 function Resolve-PythonCommand {{
-  if (Test-PythonCommand "py" @("-3")) {{
-    return @("py", "-3")
+  if (-not (Test-PythonCommand $CloudlinkPythonExe @())) {{
+    Install-CloudlinkPythonRuntime
   }}
-  if (Test-PythonCommand "python" @()) {{
-    return @("python")
-  }}
-  throw "Usable Python 3 was not found. Install Python 3 from https://www.python.org/downloads/windows/ or enable the Python launcher, then rerun the Cloudlink worker installer."
+  return @($CloudlinkPythonExe)
 }}
 
 New-Item -ItemType Directory -Force -Path $Current | Out-Null

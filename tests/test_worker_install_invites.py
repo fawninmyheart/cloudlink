@@ -75,10 +75,19 @@ def test_admin_creates_windows_worker_install_invite(monkeypatch, tmp_path):
     assert "Get-FileHash -Algorithm SHA256" in script.text
     assert "icacls" in script.text
     assert "function Invoke-Native" in script.text
+    assert "function Invoke-Installer" in script.text
     assert "function Resolve-PythonCommand" in script.text
     assert "function Test-PythonCommand" in script.text
-    assert "Test-PythonCommand \"py\" @(\"-3\")" in script.text
-    assert "Test-PythonCommand \"python\" @()" in script.text
+    assert "function Install-CloudlinkPythonRuntime" in script.text
+    assert "$CloudlinkPythonVersion = \"3.12.10\"" in script.text
+    assert "python-3.12.10-amd64.exe" in script.text
+    assert "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb" in script.text
+    assert "TargetDir=`\"$CloudlinkPythonHome`\"" in script.text
+    assert "\"PrependPath=0\"" in script.text
+    assert "\"Include_pip=1\"" in script.text
+    assert "\"Include_launcher=0\"" in script.text
+    assert "Test-PythonCommand \"py\"" not in script.text
+    assert "Test-PythonCommand \"python\"" not in script.text
     assert "$LASTEXITCODE -eq 0" in script.text
     assert "python -m venv .venv" not in script.text
     assert "Test-Path $PythonRuntime" in script.text
