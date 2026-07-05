@@ -76,6 +76,10 @@ def test_admin_creates_windows_worker_install_invite(monkeypatch, tmp_path):
     assert "icacls" in script.text
     assert "function Invoke-Native" in script.text
     assert "function Resolve-PythonCommand" in script.text
+    assert "function Test-PythonCommand" in script.text
+    assert "Test-PythonCommand \"py\" @(\"-3\")" in script.text
+    assert "Test-PythonCommand \"python\" @()" in script.text
+    assert "$LASTEXITCODE -eq 0" in script.text
     assert "python -m venv .venv" not in script.text
     assert "Test-Path $PythonRuntime" in script.text
     assert 'Invoke-Native $PythonRuntime @("-m", "pip", "install", "--upgrade", "pip")' in script.text

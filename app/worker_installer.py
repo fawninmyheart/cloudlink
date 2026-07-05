@@ -208,14 +208,26 @@ function Invoke-Native {{
   }}
 }}
 
+function Test-PythonCommand {{
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [Parameter(Mandatory = $true)][string[]]$PrefixArguments
+  )
+  if (-not (Get-Command $FilePath -ErrorAction SilentlyContinue)) {{
+    return $false
+  }}
+  & $FilePath @PrefixArguments "--version" *> $null
+  return $LASTEXITCODE -eq 0
+}}
+
 function Resolve-PythonCommand {{
-  if (Get-Command py -ErrorAction SilentlyContinue) {{
+  if (Test-PythonCommand "py" @("-3")) {{
     return @("py", "-3")
   }}
-  if (Get-Command python -ErrorAction SilentlyContinue) {{
+  if (Test-PythonCommand "python" @()) {{
     return @("python")
   }}
-  throw "Python 3 was not found. Install Python 3 and rerun the Cloudlink worker installer."
+  throw "Usable Python 3 was not found. Install Python 3 from https://www.python.org/downloads/windows/ or enable the Python launcher, then rerun the Cloudlink worker installer."
 }}
 
 New-Item -ItemType Directory -Force -Path $Current | Out-Null

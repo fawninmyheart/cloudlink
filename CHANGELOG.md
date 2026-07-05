@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026.07.05.10
+
+### Installer
+
+- Improved the generated Windows worker installer so it verifies that `py -3`
+  or `python` can actually run `--version` before selecting it. Broken Windows
+  App Execution Alias entries or missing Python installs now produce a clear
+  "Usable Python 3 was not found" message instead of `python failed with exit
+  code 9009`.
+
+### Compatibility
+
+- Server version: `2026.07.05.10`.
+- Minimum supported worker version remains `2026.07.05.6`.
+
 ## 2026.07.05.9
 
 ### Installer
