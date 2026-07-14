@@ -886,6 +886,7 @@ def dashboard_html() -> str:
     const workerStatusLabels = { online: "在线", offline: "离线", needs_update: "需要更新" };
     const sourceKindLabels = {
       symlink_file: "软链接文件",
+      owned_file: "托管文件",
       owned_archive: "托管压缩包",
     };
     const cacheStatusLabels = {

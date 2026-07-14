@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026.07.14.1
+
+### Dataset Imports
+
+- Added server-side Codex dataset source adoption. Codex token callers can now
+  submit a file path under `CLOUDLINK_CODEX_DATASET_SOURCE_ROOTS`; Cloudlink
+  copies that file into trusted managed dataset storage and records it as an
+  `owned_file` instead of requiring Codex CLI to write directly into
+  `/opt/cloudlink/data/imports`.
+- `owned_archive` registration from a Codex staging root now copies the archive
+  into managed storage and leaves the Codex staging file untouched.
+
+### Compatibility
+
+- Server version: `2026.07.14.1`.
+- Minimum supported worker version remains `2026.07.06.3`.
+
 ## 2026.07.06.7
 
 ### Installer

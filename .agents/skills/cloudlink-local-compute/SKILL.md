@@ -59,8 +59,12 @@ Internal task creation and querying must use the server-local API through `127.0
 
 Cloud-side Codex CLI must not use `sudo` to read `/etc/cloudlink.env`. Use the limited local Codex token loaded by `/opt/cloudlink/scripts/cloudlink_client.py`.
 The Codex token can register reusable datasets only from
-`CLOUDLINK_ALLOWED_DATASET_SOURCE_ROOTS`; move or symlink approved source files
-into that import area before registration.
+`CLOUDLINK_ALLOWED_DATASET_SOURCE_ROOTS`, or from
+`CLOUDLINK_CODEX_DATASET_SOURCE_ROOTS` when Cloudlink should copy a
+Codex-generated file into trusted managed storage. Do not assume Codex CLI can
+write to `/opt/cloudlink/data/imports`; write new generated files under a Codex
+writable staging root such as `/tmp/cloudlink-codex-imports`, then submit that
+path to Cloudlink.
 
 The local worker reaches worker APIs through:
 
@@ -232,7 +236,10 @@ When a task needs K-line data, tick data, model files, archives, or other large 
 
 Do not embed large CSV, JSON, or binary data in `script_job.payload`.
 
-Register a plain server-local file as a symlink-managed dataset:
+Register a plain Codex-generated file. Cloudlink copies files from
+`CLOUDLINK_CODEX_DATASET_SOURCE_ROOTS` into its trusted managed data directory;
+the resulting dataset is stored as `owned_file`, even if the request uses
+`source_kind: "symlink_file"` for compatibility:
 
 ```bash
 cd /opt/cloudlink
@@ -246,9 +253,9 @@ body = {
     "name": "btcusdt-15m",
     "version": "2024-2026-v1",
     "title": "BTCUSDT 15m klines",
-    "description": "Server-local kline csv for Cloudlink jobs.",
+    "description": "Codex-generated kline csv for Cloudlink jobs.",
     "source_kind": "symlink_file",
-    "source_path": "/home/ubuntu/research/btcusdt/data/BTCUSDT_15m.csv",
+    "source_path": "/tmp/cloudlink-codex-imports/BTCUSDT_15m.csv",
     "content_type": "text/csv",
     "manifest": {"schema": ["timestamp", "open", "high", "low", "close", "volume"]},
 }
@@ -256,7 +263,9 @@ print(json.dumps(request_json("POST", "/api/internal/datasets", body), ensure_as
 PY
 ```
 
-Register an archive as a Cloudlink-owned dataset only when Cloudlink should take ownership and move the file into its managed directory:
+Register an archive as a Cloudlink-owned dataset. From a Codex staging root,
+Cloudlink copies the archive into its managed directory and keeps the original
+staging file untouched:
 
 ```json
 {

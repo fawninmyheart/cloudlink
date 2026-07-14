@@ -91,6 +91,39 @@ def test_register_owned_archive_moves_and_deletes_real_file(monkeypatch, tmp_pat
     conn.close()
 
 
+def test_register_owned_file_copies_and_deletes_managed_copy(monkeypatch, tmp_path):
+    conn, dataset_store = make_conn(monkeypatch, tmp_path)
+    original = tmp_path / "source.csv"
+    original.write_text("ts,close\n1,100\n", encoding="utf-8")
+
+    version = dataset_store.register_dataset_version(
+        conn,
+        name="example-owned-file",
+        version="2024-v1",
+        title="Example Owned File",
+        description="test csv",
+        source_kind="owned_file",
+        source_path=str(original),
+        content_type="text/csv",
+        created_by="test",
+    )
+
+    managed = Path(version["server_path"])
+    assert original.exists()
+    assert managed.exists()
+    assert not managed.is_symlink()
+    assert managed.read_text(encoding="utf-8") == original.read_text(encoding="utf-8")
+    assert version["checksum_sha256"]
+    assert version["manifest"]["copied_from_source_path"] == str(original.resolve())
+
+    dataset_store.delete_dataset_version(conn, version["id"])
+
+    assert original.exists()
+    assert not managed.exists()
+    assert dataset_store.list_dataset_versions(conn) == []
+    conn.close()
+
+
 def test_delete_dataset_version_blocks_active_worker_cache(monkeypatch, tmp_path):
     conn, dataset_store = make_conn(monkeypatch, tmp_path)
     original = tmp_path / "source.csv"

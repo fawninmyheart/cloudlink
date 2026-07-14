@@ -191,6 +191,89 @@ def test_codex_token_can_register_dataset_inside_allowed_source_roots(
     assert Path(create.json()["server_path"]).is_symlink()
 
 
+def test_codex_token_can_import_source_path_into_cloudlink_owned_file(
+    monkeypatch,
+    tmp_path,
+):
+    staging_root = tmp_path / "codex-staging"
+    staging_root.mkdir()
+    monkeypatch.setenv("CLOUDLINK_CODEX_DATASET_SOURCE_ROOTS", str(staging_root))
+    client = make_client(monkeypatch, tmp_path)
+    source = staging_root / "generated.csv"
+    source.write_text("ts,close\n1,100\n", encoding="utf-8")
+
+    create = client.post(
+        "/api/internal/datasets",
+        headers=codex_headers(),
+        json={
+            "name": "codex-generated",
+            "version": "v1",
+            "title": "Codex Generated",
+            "description": "cloudlink should copy this into managed storage",
+            "source_kind": "symlink_file",
+            "source_path": str(source),
+            "content_type": "text/csv",
+        },
+    )
+
+    assert create.status_code == 200
+    version = create.json()
+    managed = Path(version["server_path"])
+    assert version["source_kind"] == "owned_file"
+    assert managed.exists()
+    assert not managed.is_symlink()
+    assert managed.read_text(encoding="utf-8") == "ts,close\n1,100\n"
+    assert source.exists()
+    assert version["manifest"]["copied_from_source_path"] == str(source.resolve())
+    assert version["checksum_sha256"]
+
+    delete = client.delete(
+        f"/api/internal/datasets/{version['id']}",
+        headers=internal_headers(),
+    )
+    assert delete.status_code == 200
+    assert source.exists()
+    assert not managed.exists()
+
+
+def test_codex_token_can_import_archive_without_removing_source(
+    monkeypatch,
+    tmp_path,
+):
+    staging_root = tmp_path / "codex-staging"
+    staging_root.mkdir()
+    monkeypatch.setenv("CLOUDLINK_CODEX_DATASET_SOURCE_ROOTS", str(staging_root))
+    client = make_client(monkeypatch, tmp_path)
+    source = staging_root / "generated.zip"
+    with zipfile.ZipFile(source, "w") as zip_file:
+        zip_file.writestr("data.csv", "ts,close\n1,100\n")
+
+    create = client.post(
+        "/api/internal/datasets",
+        headers=codex_headers(),
+        json={
+            "name": "codex-generated-archive",
+            "version": "v1",
+            "title": "Codex Generated Archive",
+            "description": "cloudlink should copy this archive into managed storage",
+            "source_kind": "owned_archive",
+            "source_path": str(source),
+            "content_type": "application/zip",
+            "archive_format": "zip",
+            "extract_required": True,
+        },
+    )
+
+    assert create.status_code == 200
+    version = create.json()
+    managed = Path(version["server_path"])
+    assert version["source_kind"] == "owned_archive"
+    assert source.exists()
+    assert managed.exists()
+    assert managed.read_bytes() == source.read_bytes()
+    assert version["manifest"]["copied_from_source_path"] == str(source.resolve())
+
+
 def test_internal_secret_can_register_dataset_outside_codex_source_roots(
     monkeypatch,
     tmp_path,

@@ -106,9 +106,11 @@ def test_security_boundaries_are_documented_for_open_source_users():
 
     assert "not a sandbox" in readme
     assert "CLOUDLINK_ALLOWED_DATASET_SOURCE_ROOTS" in readme
+    assert "CLOUDLINK_CODEX_DATASET_SOURCE_ROOTS" in readme
     assert "CLOUDLINK_ALLOW_INSECURE_WORKER_INSTALL" in readme
     assert "not a security sandbox" in skill
     assert "CLOUDLINK_ALLOWED_DATASET_SOURCE_ROOTS" in skill
+    assert "CLOUDLINK_CODEX_DATASET_SOURCE_ROOTS" in skill
     assert personal_domain not in env_example
     assert personal_home not in env_example
     assert personal_host not in env_example

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 
-SOURCE_KINDS = {"symlink_file", "owned_archive"}
+SOURCE_KINDS = {"symlink_file", "owned_file", "owned_archive"}
 ACTIVE_CACHE_STATUSES = {"downloading", "cached", "extracted", "delete_requested"}
 
 
@@ -39,6 +39,13 @@ def safe_slug(value: str, field_name: str) -> str:
     if value in {".", ".."}:
         raise ValueError(f"{field_name} must not be a relative path marker")
     return value
+
+
+def managed_source_filename(source: Path) -> str:
+    name = source.name
+    if name == "manifest.json":
+        return "source-file"
+    return name or "source"
 
 
 def sha256_file(path: Path) -> str:
@@ -116,9 +123,10 @@ def register_dataset_version(
     manifest_extra: Optional[Dict[str, Any]] = None,
     created_by: str = "internal",
     compute_sha256: bool = False,
+    copy_source: bool = False,
 ) -> Dict[str, Any]:
     if source_kind not in SOURCE_KINDS:
-        raise ValueError("source_kind must be symlink_file or owned_archive")
+        raise ValueError("source_kind must be symlink_file, owned_file, or owned_archive")
     source = Path(source_path).expanduser().resolve()
     if not source.is_file():
         raise FileNotFoundError(str(source))
@@ -131,14 +139,24 @@ def register_dataset_version(
 
     checksum = None
     original_path: Optional[str] = str(source)
+    copied_from_source_path: Optional[str] = None
     if source_kind == "symlink_file":
         server_path = target_dir / "source"
         server_path.symlink_to(source)
         if compute_sha256:
             checksum = sha256_file(source)
+    elif source_kind == "owned_file":
+        server_path = target_dir / managed_source_filename(source)
+        shutil.copy2(str(source), str(server_path))
+        copied_from_source_path = str(source)
+        checksum = sha256_file(server_path)
     else:
-        server_path = target_dir / source.name
-        shutil.move(str(source), str(server_path))
+        server_path = target_dir / managed_source_filename(source)
+        if copy_source:
+            shutil.copy2(str(source), str(server_path))
+            copied_from_source_path = str(source)
+        else:
+            shutil.move(str(source), str(server_path))
         original_path = str(source)
         checksum = sha256_file(server_path)
 
@@ -162,6 +180,8 @@ def register_dataset_version(
         "created_by": created_by,
         "created_at": now,
     }
+    if copied_from_source_path:
+        manifest["copied_from_source_path"] = copied_from_source_path
     if manifest_extra:
         manifest.update(manifest_extra)
 
@@ -255,7 +275,7 @@ def delete_dataset_version(conn: sqlite3.Connection, dataset_version_id: str) ->
     if version["source_kind"] == "symlink_file":
         if server_path.is_symlink() or server_path.exists():
             server_path.unlink()
-    elif version["source_kind"] == "owned_archive":
+    elif version["source_kind"] in {"owned_file", "owned_archive"}:
         if server_path.exists():
             server_path.unlink()
     manifest_path = target_dir / "manifest.json"

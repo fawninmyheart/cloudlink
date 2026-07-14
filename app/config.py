@@ -44,6 +44,7 @@ class Settings:
     codex_submitter_id: str
     codex_tokens: Dict[str, str]
     allowed_dataset_source_roots: Tuple[str, ...]
+    codex_dataset_source_roots: Tuple[str, ...]
     allow_insecure_worker_install: bool
 
 
@@ -133,6 +134,15 @@ def get_settings() -> Settings:
     Path(database_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
     data_root = str(Path(os.getenv("CLOUDLINK_DATA_ROOT", "./data")).expanduser().resolve())
     default_dataset_source_roots = (str(Path(data_root) / "imports"),)
+    default_codex_dataset_source_roots = (
+        str(
+            Path(
+                os.getenv("CLOUDLINK_CODEX_IMPORT_ROOT", "/tmp/cloudlink-codex-imports")
+            )
+            .expanduser()
+            .resolve()
+        ),
+    )
     worker_secret = _reject_placeholder_secret(
         "WORKER_SECRET",
         os.getenv("WORKER_SECRET", ""),
@@ -189,6 +199,10 @@ def get_settings() -> Settings:
         allowed_dataset_source_roots=_path_tuple_env(
             "CLOUDLINK_ALLOWED_DATASET_SOURCE_ROOTS",
             default_dataset_source_roots,
+        ),
+        codex_dataset_source_roots=_path_tuple_env(
+            "CLOUDLINK_CODEX_DATASET_SOURCE_ROOTS",
+            default_codex_dataset_source_roots,
         ),
         allow_insecure_worker_install=_bool_env(
             "CLOUDLINK_ALLOW_INSECURE_WORKER_INSTALL",

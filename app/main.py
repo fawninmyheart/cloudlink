@@ -879,17 +879,23 @@ def api_register_dataset(
     conn: Connection = Depends(get_connection),
 ) -> Dict[str, Any]:
     settings = get_settings()
-    if auth.kind == "codex" and not is_path_within_roots(
-        body.source_path,
-        settings.allowed_dataset_source_roots,
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "Dataset source path is outside allowed dataset source roots "
-                "for Codex token"
-            ),
-        )
+    source_kind = body.source_kind
+    copy_source = False
+    if auth.kind == "codex":
+        if is_path_within_roots(body.source_path, settings.allowed_dataset_source_roots):
+            pass
+        elif is_path_within_roots(body.source_path, settings.codex_dataset_source_roots):
+            copy_source = True
+            if source_kind == "symlink_file":
+                source_kind = "owned_file"
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Dataset source path is outside allowed dataset source roots "
+                    "and Codex dataset source roots"
+                ),
+            )
     try:
         return register_dataset_version(
             conn,
@@ -897,7 +903,7 @@ def api_register_dataset(
             version=body.version,
             title=body.title or body.name,
             description=body.description,
-            source_kind=body.source_kind,
+            source_kind=source_kind,
             source_path=body.source_path,
             content_type=body.content_type,
             archive_format=body.archive_format,
@@ -905,6 +911,7 @@ def api_register_dataset(
             manifest_extra=body.manifest,
             created_by=body.created_by,
             compute_sha256=body.compute_sha256,
+            copy_source=copy_source,
         )
     except Exception as exc:
         raise map_store_error(exc) from exc
