@@ -10,6 +10,8 @@
 - Removed the generated PowerShell worker installer and Windows-specific
   memory probing from the worker package. Native Windows worker startup exits
   with a clear WSL instruction.
+- Legacy native Windows workers are marked `unsupported_platform` and cannot
+  claim new tasks; WSL workers continue to register and schedule as Linux.
 - Worker install registration now validates that the runtime platform matches
   the invite platform: `darwin` maps to `macos`, and WSL/Linux maps to `linux`.
 

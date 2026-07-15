@@ -133,10 +133,24 @@ def attach_worker_version_state(worker: Dict[str, Any]) -> None:
     worker["minimum_worker_version"] = minimum_worker_version
     worker["required_version"] = minimum_worker_version
     worker["worker_version"] = worker_version or None
+    unsupported_platform = worker_uses_unsupported_platform(worker)
     worker["version_status"] = (
-        "ok" if version_at_least(worker_version, minimum_worker_version) else "needs_update"
+        "unsupported_platform"
+        if unsupported_platform
+        else "ok"
+        if version_at_least(worker_version, minimum_worker_version)
+        else "needs_update"
     )
     worker["needs_update"] = worker["version_status"] != "ok"
+
+
+def worker_uses_unsupported_platform(worker: Dict[str, Any]) -> bool:
+    install_platform = str(worker.get("install_platform") or "").strip().lower()
+    if install_platform == "windows":
+        return True
+    runtime = worker.get("runtime_profile") or {}
+    runtime_system = str(runtime.get("system") or "").strip().lower()
+    return runtime_system.startswith("windows") or runtime_system == "win32"
 
 
 def worker_is_schedulable(worker: Dict[str, Any]) -> bool:

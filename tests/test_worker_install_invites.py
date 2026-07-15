@@ -256,6 +256,8 @@ def test_dashboard_exposes_password_and_worker_install_controls():
     assert "openWorkerInstallModal(button.dataset.openWorkerInstallCommand)" in text
     assert "请先填写节点 ID" in text
     assert "worker-install-id" in text
+    assert "不支持系统" in text
+    assert "原生 Windows worker 不再支持" in text
     assert "/api/admin/password" in text
     assert "/api/admin/worker-install-invites" in text
 

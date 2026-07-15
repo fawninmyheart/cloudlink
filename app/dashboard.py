@@ -336,7 +336,7 @@ def dashboard_html() -> str:
     .state.success, .state.online, .state.cached, .state.extracted, .state.ok { color: var(--ok); background: var(--ok-bg); }
     .state.running, .state.downloading { color: var(--accent); background: var(--accent-soft); }
     .state.pending, .state.delete_requested { color: var(--warn); background: var(--warn-bg); }
-    .state.failed, .state.timeout, .state.offline, .state.missing, .state.invalid, .state.needs_update { color: var(--bad); background: var(--bad-bg); }
+    .state.failed, .state.timeout, .state.offline, .state.missing, .state.invalid, .state.needs_update, .state.unsupported_platform { color: var(--bad); background: var(--bad-bg); }
     .state.idle, .state.deleted, .state.disabled { color: var(--idle); background: var(--idle-bg); }
     .tags {
       display: flex;
@@ -882,7 +882,12 @@ def dashboard_html() -> str:
       timeout: "超时",
       cancelled: "已取消",
     };
-    const workerStatusLabels = { online: "在线", offline: "离线", needs_update: "需要更新" };
+    const workerStatusLabels = {
+      online: "在线",
+      offline: "离线",
+      needs_update: "需要更新",
+      unsupported_platform: "不支持系统",
+    };
     const sourceKindLabels = {
       symlink_file: "软链接文件",
       owned_file: "托管文件",
@@ -1053,6 +1058,7 @@ def dashboard_html() -> str:
     }
 
     function workerEffectiveStatus(worker) {
+      if (worker.version_status === "unsupported_platform") return "unsupported_platform";
       if (worker.needs_update) return "needs_update";
       return worker.online ? "online" : "offline";
     }
@@ -1115,7 +1121,8 @@ def dashboard_html() -> str:
             <div class="worker-stat"><span>并发</span><strong>${esc(active)} / ${esc(concurrency)}</strong></div>
             <div class="worker-stat"><span>系统保留</span><strong>${esc(reserveSummary(reserve))}</strong></div>
           </div>
-          ${worker.needs_update ? `<div class="muted">worker ${esc(worker.worker_version || "未知版本")}，最低要求 ${esc(worker.minimum_worker_version || worker.required_version || "-")}</div>` : ""}
+          ${worker.version_status === "unsupported_platform" ? `<div class="muted">原生 Windows worker 不再支持，请在 WSL 中选择 Linux 重新部署。</div>` : ""}
+          ${worker.needs_update && worker.version_status !== "unsupported_platform" ? `<div class="muted">worker ${esc(worker.worker_version || "未知版本")}，最低要求 ${esc(worker.minimum_worker_version || worker.required_version || "-")}</div>` : ""}
           ${reserveSyncLine(worker)}
           <div class="worker-paths">
             <div>任务盘 <span class="mono">${esc(runtime.job_root || "-")}</span></div>

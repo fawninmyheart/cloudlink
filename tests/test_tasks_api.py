@@ -567,6 +567,58 @@ def test_worker_newer_than_minimum_version_can_claim(monkeypatch, tmp_path):
     assert response.json()["task"]["id"] == task_id
 
 
+def test_native_windows_worker_is_unsupported_and_cannot_claim(monkeypatch, tmp_path):
+    client = make_client(monkeypatch, tmp_path)
+    register_worker(
+        client,
+        runtime_profile={
+            "cloudlink_version": TEST_WORKER_VERSION,
+            "python_version": "3.11",
+            "system": "Windows",
+        },
+    )
+    task_id = create_echo_task(client)
+
+    response = client.post(
+        "/api/worker/claim",
+        headers=worker_headers(),
+        json={"worker_id": "local-worker-1", "supported_types": ["echo_test"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"task": None}
+    task = client.get(f"/api/internal/tasks/{task_id}", headers=internal_headers()).json()
+    assert task["status"] == "pending"
+
+    overview = client.get("/api/admin/overview", auth=admin_auth()).json()
+    worker = overview["workers"][0]
+    assert worker["needs_update"] is True
+    assert worker["version_status"] == "unsupported_platform"
+
+
+def test_wsl_linux_worker_can_claim_with_microsoft_kernel_string(monkeypatch, tmp_path):
+    client = make_client(monkeypatch, tmp_path)
+    register_worker(
+        client,
+        runtime_profile={
+            "cloudlink_version": TEST_WORKER_VERSION,
+            "python_version": "3.11",
+            "system": "Linux",
+            "platform": "Linux-5.15.0-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+        },
+    )
+    task_id = create_echo_task(client)
+
+    response = client.post(
+        "/api/worker/claim",
+        headers=worker_headers(),
+        json={"worker_id": "local-worker-1", "supported_types": ["echo_test"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["task"]["id"] == task_id
+
+
 def test_worker_claim_returns_null_when_no_supported_task(monkeypatch, tmp_path):
     client = make_client(monkeypatch, tmp_path)
     register_worker(client, supported_types=["generate_daily_report"])
