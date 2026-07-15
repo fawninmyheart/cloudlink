@@ -5,7 +5,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 
-VALID_INSTALL_PLATFORMS = {"macos", "linux", "windows"}
+VALID_INSTALL_PLATFORMS = {"macos", "linux"}
+
+
+def normalize_runtime_platform(platform: str) -> Optional[str]:
+    value = (platform or "").strip().lower()
+    if value in {"macos", "darwin"} or value.startswith("darwin-"):
+        return "macos"
+    if value == "linux" or value.startswith("linux-"):
+        return "linux"
+    return None
 
 
 class WorkerInstallInviteError(Exception):
@@ -47,7 +56,7 @@ def create_worker_install_invite(
 ) -> Dict[str, Any]:
     normalized_platform = platform.strip().lower()
     if normalized_platform not in VALID_INSTALL_PLATFORMS:
-        raise WorkerInstallInviteError("platform must be macos, linux, or windows")
+        raise WorkerInstallInviteError("platform must be macos or linux")
     resolved_worker_id = (worker_id or "").strip()
     if not resolved_worker_id:
         raise WorkerInstallInviteError("worker_id is required")

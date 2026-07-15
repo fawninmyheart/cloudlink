@@ -153,16 +153,12 @@ def test_detect_total_memory_uses_sysconf_fallback(monkeypatch):
     assert detect_total_memory_bytes() == 409600
 
 
-def test_windows_memory_detection_uses_global_memory_status(monkeypatch):
+def test_windows_memory_detection_is_not_supported_natively(monkeypatch):
     monkeypatch.setattr("worker.hardware.sys.platform", "win32")
-    monkeypatch.setattr(
-        "worker.hardware._windows_memory_status",
-        lambda: (32 * 1024**3, 20 * 1024**3),
-        raising=False,
-    )
+    monkeypatch.setattr("worker.hardware.os.sysconf", lambda _key: (_ for _ in ()).throw(OSError))
 
-    assert detect_total_memory_bytes() == 32 * 1024**3
-    assert detect_available_memory_bytes() == 20 * 1024**3
+    assert detect_total_memory_bytes() is None
+    assert detect_available_memory_bytes() is None
 
 
 def test_disk_usage_returns_zero_for_invalid_path(tmp_path):

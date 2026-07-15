@@ -58,48 +58,22 @@ def test_admin_creates_macos_worker_install_invite_without_exposing_secret(
     assert '-name "*.py" -exec touch' in script.text
 
 
-def test_admin_creates_windows_worker_install_invite(monkeypatch, tmp_path):
+def test_admin_rejects_windows_worker_install_invite(monkeypatch, tmp_path):
     monkeypatch.setenv("CLOUDLINK_PUBLIC_BASE_URL", "https://tasks.example.test")
     client = make_client(monkeypatch, tmp_path)
 
-    invite = create_invite(client, platform="windows")
+    response = client.post(
+        "/api/admin/worker-install-invites",
+        auth=admin_auth(),
+        json={
+            "platform": "windows",
+            "worker_id": "windows-worker-a",
+            "display_name": "Windows Worker",
+        },
+    )
 
-    assert invite["platform"] == "windows"
-    assert "powershell" in invite["command"].lower()
-    assert invite["script_url"].endswith("/install.ps1")
-
-    script = client.get(urlparse(invite["script_url"]).path)
-    assert script.status_code == 200
-    assert "Invoke-RestMethod" in script.text
-    assert 'CommandLine -like "*worker.local_worker*"' in script.text
-    assert "Existing Cloudlink worker processes stopped." in script.text
-    assert "test-secret" not in script.text
-    assert invite["package_sha256"] in script.text
-    assert "Get-FileHash -Algorithm SHA256" in script.text
-    assert "icacls" in script.text
-    assert "function Invoke-Native" in script.text
-    assert "function Invoke-Installer" in script.text
-    assert "function Resolve-PythonCommand" in script.text
-    assert "function Test-PythonCommand" in script.text
-    assert "function Install-CloudlinkPythonRuntime" in script.text
-    assert "$CloudlinkPythonVersion = \"3.12.10\"" in script.text
-    assert "python-3.12.10-amd64.exe" in script.text
-    assert "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb" in script.text
-    assert "TargetDir=`\"$CloudlinkPythonHome`\"" in script.text
-    assert "\"PrependPath=0\"" in script.text
-    assert "\"Include_pip=1\"" in script.text
-    assert "\"Include_launcher=0\"" in script.text
-    assert "Test-PythonCommand \"py\"" not in script.text
-    assert "Test-PythonCommand \"python\"" not in script.text
-    assert "[Parameter(Mandatory = $true)][string[]]$PrefixArguments" not in script.text
-    assert "Test-PythonCommand $CloudlinkPythonExe @()" in script.text
-    assert "$LASTEXITCODE -eq 0" in script.text
-    assert "python -m venv .venv" not in script.text
-    assert "Test-Path $PythonRuntime" in script.text
-    assert 'Invoke-Native $PythonRuntime @("-m", "pip", "install", "--upgrade", "pip")' in script.text
-    assert 'Filter "__pycache__"' in script.text
-    assert 'Filter "*.pyc"' in script.text
-    assert "LastWriteTimeUtc" in script.text
+    assert response.status_code == 400
+    assert "macos or linux" in response.json()["detail"]
 
 
 def test_worker_install_invite_rejects_blank_worker_id(monkeypatch, tmp_path):
@@ -109,7 +83,7 @@ def test_worker_install_invite_rejects_blank_worker_id(monkeypatch, tmp_path):
     response = client.post(
         "/api/admin/worker-install-invites",
         auth=admin_auth(),
-        json={"platform": "windows", "worker_id": "   ", "display_name": ""},
+        json={"platform": "linux", "worker_id": "   ", "display_name": ""},
     )
 
     assert response.status_code == 400
@@ -286,12 +260,15 @@ def test_dashboard_exposes_password_and_worker_install_controls():
     assert "/api/admin/worker-install-invites" in text
 
 
-def test_dashboard_platform_inference_treats_darwin_as_macos_not_windows():
+def test_dashboard_platform_inference_treats_darwin_as_macos_and_windows_as_linux():
     text = __import__("pathlib").Path("app/dashboard.py").read_text(encoding="utf-8")
 
     assert 'hint === "darwin"' in text
     assert 'hint === "windows"' in text
     assert text.index('hint === "darwin"') < text.index('hint === "windows"')
+    assert '<option value="windows">' not in text
+    assert "Windows 电脑请先进入 WSL" in text
+    assert 'return "linux";' in text
     assert 'system.includes("win")' not in text
 
 

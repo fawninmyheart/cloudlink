@@ -342,8 +342,11 @@ request_json(
 Workers must be registered before they can claim tasks. In normal operation,
 do not manually copy worker files or manually register workers.
 
-Open the dashboard, choose **本地算力节点 -> 添加节点**, select macOS, Linux, or
-Windows, then copy the generated command to the local compute node terminal.
+Open the dashboard, choose **本地算力节点 -> 添加节点**, select macOS or Linux,
+then copy the generated command to the local compute node terminal. Windows
+hosts are supported through WSL only: install a Linux distribution in WSL,
+open the WSL shell, select **Linux** in the Cloudlink dashboard, and run the
+generated command inside WSL.
 
 The generated command:
 
@@ -351,12 +354,9 @@ The generated command:
 2. Downloads `package.tar.gz` from the Cloudlink server, not from GitHub.
 3. Verifies the worker package SHA256 before extracting it.
 4. Installs the worker under the local user's Cloudlink directory.
-5. On Windows, installs a Cloudlink-private Python runtime under the worker
-   install directory if it is missing. The private runtime is checksum-verified
-   and does not modify system `PATH`.
-6. Creates a Python virtualenv and installs requirements.
-7. Exchanges the short-lived invite token for worker registration over HTTPS.
-8. Writes local worker configuration with restricted file permissions and starts the worker.
+5. Creates a Python virtualenv and installs requirements.
+6. Exchanges the short-lived invite token for worker registration over HTTPS.
+7. Writes local worker configuration with restricted file permissions and starts the worker.
 
 The command contains only a short-lived invite token. It does not display
 `WORKER_SECRET` in the dashboard. The worker receives a node-specific credential

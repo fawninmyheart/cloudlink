@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026.07.15.1
+
+### Installer
+
+- Removed native Windows worker support. The dashboard now only generates
+  macOS and Linux installer commands, and Windows hosts should register through
+  WSL with the Linux installer.
+- Removed the generated PowerShell worker installer and Windows-specific
+  memory probing from the worker package. Native Windows worker startup exits
+  with a clear WSL instruction.
+- Worker install registration now validates that the runtime platform matches
+  the invite platform: `darwin` maps to `macos`, and WSL/Linux maps to `linux`.
+
+### Compatibility
+
+- Server version: `2026.07.15.1`.
+- Minimum supported worker version remains `2026.07.06.3`.
+
 ## 2026.07.14.1
 
 ### Dataset Imports

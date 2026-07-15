@@ -179,9 +179,6 @@ def detect_total_memory_bytes() -> Optional[int]:
         meminfo = _linux_meminfo()
         total_kb = meminfo.get("MemTotal")
         return total_kb * 1024 if total_kb is not None else _sysconf_total_memory_bytes()
-    if sys.platform.startswith("win"):
-        status = _windows_memory_status()
-        return status[0] if status else _sysconf_total_memory_bytes()
     return _sysconf_total_memory_bytes()
 
 
@@ -206,36 +203,7 @@ def detect_available_memory_bytes() -> Optional[int]:
         # macOS exposes precise available memory through vm_stat, but the format
         # varies by release. Keep collection conservative instead of brittle.
         return None
-    if sys.platform.startswith("win"):
-        status = _windows_memory_status()
-        return status[1] if status else None
     return None
-
-
-def _windows_memory_status() -> Optional[Tuple[int, int]]:
-    try:
-        import ctypes
-
-        class MemoryStatusEx(ctypes.Structure):
-            _fields_ = [
-                ("dwLength", ctypes.c_ulong),
-                ("dwMemoryLoad", ctypes.c_ulong),
-                ("ullTotalPhys", ctypes.c_ulonglong),
-                ("ullAvailPhys", ctypes.c_ulonglong),
-                ("ullTotalPageFile", ctypes.c_ulonglong),
-                ("ullAvailPageFile", ctypes.c_ulonglong),
-                ("ullTotalVirtual", ctypes.c_ulonglong),
-                ("ullAvailVirtual", ctypes.c_ulonglong),
-                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-            ]
-
-        status = MemoryStatusEx()
-        status.dwLength = ctypes.sizeof(MemoryStatusEx)
-        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            return None
-        return int(status.ullTotalPhys), int(status.ullAvailPhys)
-    except Exception:
-        return None
 
 
 def detect_gpu_devices() -> list[Dict[str, Any]]:

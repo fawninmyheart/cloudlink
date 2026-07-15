@@ -624,6 +624,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[List[str]] = None) -> None:
     try:
+        if sys.platform.startswith("win"):
+            print(
+                "Cloudlink no longer supports native Windows workers. "
+                "Install WSL and register the node with the Linux installer.",
+                flush=True,
+            )
+            raise SystemExit(2)
         args = parse_args(argv)
         if args.command == "print-config":
             print_safe_config(load_worker_config())

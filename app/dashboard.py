@@ -829,7 +829,6 @@ def dashboard_html() -> str:
             <select id="worker-install-platform">
               <option value="macos">macOS</option>
               <option value="linux">Linux</option>
-              <option value="windows">Windows</option>
             </select>
           </label>
           <label class="field">
@@ -842,7 +841,7 @@ def dashboard_html() -> str:
           </label>
         </div>
         <div class="command-box">
-          <div class="modal-note">生成后复制命令到本地计算节点终端执行。命令使用短期安装 token，不包含长期 worker 密钥。</div>
+          <div class="modal-note">生成后复制命令到本地计算节点终端执行。命令使用短期安装 token，不包含长期 worker 密钥。Windows 电脑请先进入 WSL，然后选择 Linux。</div>
           <textarea id="worker-install-command" readonly spellcheck="false" placeholder="点击生成安装命令"></textarea>
           <div class="row-actions">
             <button id="worker-install-generate" type="button">生成安装命令</button>
@@ -1572,8 +1571,8 @@ def dashboard_html() -> str:
       for (const hint of hints) {
         if (!hint) continue;
         if (hint === "macos" || hint === "darwin" || hint.includes("macos")) return "macos";
-        if (hint === "windows" || hint.startsWith("windows-") || hint.includes("microsoft windows")) return "windows";
         if (hint === "linux" || hint.startsWith("linux-")) return "linux";
+        if (hint === "windows" || hint.startsWith("windows-") || hint.includes("microsoft windows")) return "linux";
       }
       return "macos";
     }

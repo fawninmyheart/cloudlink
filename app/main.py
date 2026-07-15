@@ -51,6 +51,7 @@ from app.installer_store import (
     create_worker_install_invite,
     get_worker_install_invite,
     mark_worker_install_invite_used,
+    normalize_runtime_platform,
 )
 from app.task_store import (
     PayloadTooLarge,
@@ -84,7 +85,6 @@ from app.task_store import (
 from app.worker_installer import (
     build_worker_package,
     render_posix_install_script,
-    render_windows_install_script,
     worker_package_sha256,
     worker_env_text,
     worker_install_command,
@@ -583,8 +583,7 @@ def api_admin_create_worker_install_invite(
         )
     except Exception as exc:
         raise map_install_invite_error(exc) from exc
-    script_name = "install.ps1" if invite["platform"] == "windows" else "install.sh"
-    script_url = f"{base_url}/install/worker/{invite['token']}/{script_name}"
+    script_url = f"{base_url}/install/worker/{invite['token']}/install.sh"
     package_url = f"{base_url}/install/worker/{invite['token']}/package.tar.gz"
     return {
         "worker_id": invite["worker_id"],
@@ -605,27 +604,9 @@ def api_worker_install_shell_script(
 ) -> str:
     try:
         invite = get_worker_install_invite(conn, token)
-        if invite["platform"] == "windows":
+        if invite["platform"] not in {"macos", "linux"}:
             raise WorkerInstallInviteNotFound("wrong platform")
         return render_posix_install_script(
-            base_url=invite["public_base_url"],
-            token=token,
-            package_sha256=worker_package_sha256(),
-        )
-    except Exception as exc:
-        raise map_install_invite_error(exc) from exc
-
-
-@app.get("/install/worker/{token}/install.ps1", response_class=PlainTextResponse)
-def api_worker_install_powershell_script(
-    token: str,
-    conn: Connection = Depends(get_connection),
-) -> str:
-    try:
-        invite = get_worker_install_invite(conn, token)
-        if invite["platform"] != "windows":
-            raise WorkerInstallInviteNotFound("wrong platform")
-        return render_windows_install_script(
             base_url=invite["public_base_url"],
             token=token,
             package_sha256=worker_package_sha256(),
@@ -658,8 +639,14 @@ def api_worker_install_register(
 ) -> Dict[str, Any]:
     try:
         invite = get_worker_install_invite(conn, token)
-        if body.platform and invite["platform"] == "windows" and body.platform != "windows":
-            raise WorkerInstallInviteError("platform does not match invite")
+        if invite["platform"] not in {"macos", "linux"}:
+            raise WorkerInstallInviteError(
+                "Windows native workers are not supported; use WSL and register as Linux"
+            )
+        if body.platform:
+            runtime_platform = normalize_runtime_platform(body.platform)
+            if runtime_platform != invite["platform"]:
+                raise WorkerInstallInviteError("platform does not match invite")
         settings = get_settings()
         supported_types = sorted(settings.allowed_task_types)
         worker_secret = secrets.token_urlsafe(32)
