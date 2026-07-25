@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from app.version import CLOUDLINK_VERSION
@@ -145,6 +146,10 @@ def test_build_runtime_profile_includes_python_and_roots(tmp_path):
 def test_detect_nvidia_gpu_reports_schedulable_and_monitoring_metrics(monkeypatch):
     monkeypatch.setattr("worker.hardware.sys.platform", "linux")
     monkeypatch.setattr(
+        "worker.hardware.shutil.which",
+        lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None,
+    )
+    monkeypatch.setattr(
         "worker.hardware.subprocess.check_output",
         lambda *_args, **_kwargs: (
             "NVIDIA GeForce RTX 4090, 49140, 46272, 581.57, 13, 27, 19.5, 450.0\n"
@@ -165,6 +170,30 @@ def test_detect_nvidia_gpu_reports_schedulable_and_monitoring_metrics(monkeypatc
             "power_limit_watts": 450.0,
         }
     ]
+
+
+def test_detect_nvidia_gpu_uses_wsl_system_path(monkeypatch):
+    monkeypatch.setattr("worker.hardware.sys.platform", "linux")
+    monkeypatch.setattr("worker.hardware.shutil.which", lambda _name: None)
+    monkeypatch.setattr(
+        "worker.hardware.Path.is_file",
+        lambda path: str(path) == "/usr/lib/wsl/lib/nvidia-smi",
+    )
+    monkeypatch.setattr(
+        "worker.hardware.os.access",
+        lambda path, mode: str(path) == "/usr/lib/wsl/lib/nvidia-smi"
+        and mode == os.X_OK,
+    )
+    commands = []
+
+    def fake_check_output(command, **_kwargs):
+        commands.append(command)
+        return "RTX 4090, 49140, 48000, 581.57, 1, 25, 15, 450\n"
+
+    monkeypatch.setattr("worker.hardware.subprocess.check_output", fake_check_output)
+
+    assert detect_gpu_devices()[0]["name"] == "RTX 4090"
+    assert commands[0][0] == "/usr/lib/wsl/lib/nvidia-smi"
 
 
 def test_detect_total_memory_uses_sysconf_fallback(monkeypatch):

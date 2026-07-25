@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026.07.26.3
+
+### WSL GPU Detection
+
+- Added `/usr/lib/wsl/lib/nvidia-smi` discovery for systemd worker services,
+  whose service PATH does not normally include the WSL NVIDIA utility directory.
+- Kept the minimum supported worker version at `2026.07.25.1`; WSL GPU workers
+  should update to this release to publish schedulable GPU devices.
+
 ## 2026.07.26.2
 
 ### GPU Capacity

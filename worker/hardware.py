@@ -251,10 +251,13 @@ def _linux_meminfo() -> Dict[str, int]:
 
 
 def _detect_nvidia_gpus() -> list[Dict[str, Any]]:
+    executable = _nvidia_smi_executable()
+    if executable is None:
+        return []
     try:
         output = subprocess.check_output(
             [
-                "nvidia-smi",
+                executable,
                 (
                     "--query-gpu=name,memory.total,memory.free,driver_version,"
                     "utilization.gpu,temperature.gpu,power.draw,power.limit"
@@ -305,6 +308,16 @@ def _detect_nvidia_gpus() -> list[Dict[str, Any]]:
             }
         )
     return devices
+
+
+def _nvidia_smi_executable() -> Optional[str]:
+    discovered = shutil.which("nvidia-smi")
+    if discovered:
+        return discovered
+    for candidate in (Path("/usr/lib/wsl/lib/nvidia-smi"), Path("/usr/bin/nvidia-smi")):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
 
 
 def _optional_number(value: Any) -> Optional[float]:
