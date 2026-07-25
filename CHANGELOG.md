@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.07.25.3
+
+### Legacy Windows Removal
+
+- Added a PowerShell uninstall-only migration path for native Windows workers
+  registered before Windows worker support was removed.
+- Windows remains unsupported for registration and task execution; new Windows
+  compute nodes must use WSL and register as Linux.
+- Fixed unsupported Windows nodes receiving a Bash command whose script endpoint
+  failed with HTTP 500.
+
 ## 2026.07.25.2
 
 ### Console

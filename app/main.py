@@ -93,6 +93,7 @@ from app.storage_cleanup import (
 )
 from app.worker_installer import (
     build_worker_package,
+    render_legacy_windows_uninstall_script,
     render_posix_install_script,
     render_posix_uninstall_script,
     worker_package_sha256,
@@ -814,12 +815,21 @@ def api_admin_create_worker_uninstall_invite(
         )
     except Exception as exc:
         raise map_uninstall_invite_error(exc) from exc
-    script_url = f"{base_url}/uninstall/worker/{invite['token']}/uninstall.sh"
+    worker = get_worker(conn, worker_id)
+    platform = str(worker.get("install_platform") or "").strip().lower()
+    if not platform:
+        runtime_system = str(
+            (worker.get("runtime_profile") or {}).get("system") or ""
+        ).strip().lower()
+        platform = "windows" if runtime_system.startswith("windows") else "linux"
+    script_name = "uninstall.ps1" if platform == "windows" else "uninstall.sh"
+    script_url = f"{base_url}/uninstall/worker/{invite['token']}/{script_name}"
     return {
         "worker_id": worker_id,
+        "platform": platform,
         "expires_at": invite["expires_at"],
         "script_url": script_url,
-        "command": worker_uninstall_command(script_url),
+        "command": worker_uninstall_command(platform, script_url),
     }
 
 
@@ -834,10 +844,40 @@ def api_worker_uninstall_shell_script(
     try:
         invite = get_worker_uninstall_invite(conn, token)
         worker = get_worker(conn, invite["worker_id"])
+        platform = str(worker.get("install_platform") or "linux").strip().lower()
+        if platform == "windows":
+            raise WorkerUninstallInviteError(
+                "This legacy Windows worker requires uninstall.ps1"
+            )
         return render_posix_uninstall_script(
             base_url=invite["public_base_url"],
             token=token,
-            platform=worker.get("install_platform") or "linux",
+            platform=platform,
+            worker_id=worker["worker_id"],
+        )
+    except Exception as exc:
+        raise map_uninstall_invite_error(exc) from exc
+
+
+@app.get(
+    "/uninstall/worker/{token}/uninstall.ps1",
+    response_class=PlainTextResponse,
+)
+def api_legacy_windows_worker_uninstall_script(
+    token: str,
+    conn: Connection = Depends(get_connection),
+) -> str:
+    try:
+        invite = get_worker_uninstall_invite(conn, token)
+        worker = get_worker(conn, invite["worker_id"])
+        platform = str(worker.get("install_platform") or "").strip().lower()
+        if platform != "windows":
+            raise WorkerUninstallInviteError(
+                "This worker requires the POSIX uninstall script"
+            )
+        return render_legacy_windows_uninstall_script(
+            base_url=invite["public_base_url"],
+            token=token,
             worker_id=worker["worker_id"],
         )
     except Exception as exc:
