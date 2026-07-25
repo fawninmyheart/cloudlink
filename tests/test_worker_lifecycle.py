@@ -63,7 +63,7 @@ def test_scripted_uninstall_requires_worker_confirmation(monkeypatch, tmp_path):
     assert all(item["worker_id"] != worker["worker_id"] for item in after["workers"])
 
 
-def test_legacy_windows_worker_gets_powershell_uninstaller(monkeypatch, tmp_path):
+def test_unsupported_worker_cannot_create_uninstall_invite(monkeypatch, tmp_path):
     monkeypatch.setenv("CLOUDLINK_PUBLIC_BASE_URL", "https://tasks.example.test")
     client = make_client(monkeypatch, tmp_path)
     worker = _installed_worker(client)
@@ -73,31 +73,19 @@ def test_legacy_windows_worker_gets_powershell_uninstaller(monkeypatch, tmp_path
             (worker["worker_id"],),
         )
 
-    invite = client.post(
+    response = client.post(
         f"/api/admin/workers/{worker['worker_id']}/uninstall-invite",
         auth=admin_auth(),
     )
-    assert invite.status_code == 200
-    payload = invite.json()
-    assert payload["platform"] == "windows"
-    assert payload["script_url"].endswith("/uninstall.ps1")
-    assert payload["command"].startswith(
-        "powershell -NoProfile -ExecutionPolicy Bypass"
-    )
-    script_path = urlparse(payload["script_url"]).path
-    script = client.get(script_path)
-    assert script.status_code == 200
-    assert "Invoke-RestMethod" in script.text
-    assert "Stop-Process" in script.text
-    assert 'Remove-Item -Recurse -Force $Current' in script.text
-    assert "Jobs, datasets, environments, outputs, runtimes, and logs were preserved." in script.text
-    assert ".cloudlink\\datasets" not in script.text
-    assert ".cloudlink\\jobs" not in script.text
+    assert response.status_code == 400
+    assert "only macOS and Linux" in response.json()["detail"]
 
-    token = [part for part in script_path.split("/") if part][2]
-    wrong_script = client.get(f"/uninstall/worker/{token}/uninstall.sh")
-    assert wrong_script.status_code == 400
-    assert "requires uninstall.ps1" in wrong_script.json()["detail"]
+    with sqlite3.connect(client.db_path) as conn:
+        invite_count = conn.execute(
+            "SELECT COUNT(*) FROM worker_uninstall_invites WHERE worker_id = ?",
+            (worker["worker_id"],),
+        ).fetchone()[0]
+    assert invite_count == 0
 
 
 def test_gpu_invite_requires_linux_absolute_environment(monkeypatch, tmp_path):

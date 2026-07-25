@@ -379,12 +379,6 @@ on disk. An offline worker can be archived as lost only after seven days; this
 revokes it and hides it from scheduling without pretending its local files were
 deleted.
 
-Native Windows workers registered by older Cloudlink releases receive a
-PowerShell uninstall-only migration command. This removes the obsolete worker
-process, code, configuration, and credentials while preserving jobs, datasets,
-environments, runtimes, outputs, and logs. It does not restore Windows worker
-support; new Windows computers must use WSL and register as Linux.
-
 ## Linux And WSL GPU Workers
 
 GPU workers are supported on Linux, including a Linux distribution running in

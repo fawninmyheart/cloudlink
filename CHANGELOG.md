@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026.07.25.4
+
+### Platform Cleanup
+
+- Removed the temporary PowerShell uninstall migration endpoint after the final
+  legacy native Windows worker was retired.
+- Kept explicit native Windows rejection and WSL guidance; supported worker
+  platforms remain macOS and Linux only.
+- Kept the minimum supported worker version at `2026.07.25.1`.
+
 ## 2026.07.25.3
 
 ### Legacy Windows Removal
