@@ -1,10 +1,10 @@
 def dashboard_html() -> str:
     return """<!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Cloudlink 调度控制台</title>
+  <title>Cloudlink Scheduler Console</title>
   <style>
     :root {
       color-scheme: light;
@@ -642,6 +642,7 @@ def dashboard_html() -> str:
     </div>
     <div class="header-actions">
       <div class="last-updated" id="updated">正在载入</div>
+      <button id="language-toggle" type="button">中文</button>
       <button id="open-password-modal" type="button">修改密码</button>
       <button id="refresh" type="button">刷新</button>
     </div>
@@ -691,7 +692,10 @@ def dashboard_html() -> str:
       <section class="panel" id="datasets-panel">
         <div class="panel-head">
           <h2 class="panel-title">服务器数据维护</h2>
-          <div class="panel-meta" id="dataset-count">0 份数据</div>
+          <div class="row-actions">
+            <div class="panel-meta" id="dataset-count">0 份数据</div>
+            <button id="purge-artifacts" type="button">清理过期产物</button>
+          </div>
         </div>
         <div class="table-wrap">
           <table aria-label="服务器数据维护">
@@ -839,6 +843,17 @@ def dashboard_html() -> str:
             显示名称
             <input id="worker-install-name" type="text" spellcheck="false" placeholder="例如 Mac mini">
           </label>
+          <label class="field">
+            GPU 节点
+            <select id="worker-install-gpu">
+              <option value="0">否</option>
+              <option value="1">是，仅 Linux</option>
+            </select>
+          </label>
+          <label class="field" id="worker-install-gpu-path-field" hidden>
+            micromamba 环境完整路径
+            <input id="worker-install-gpu-path" type="text" spellcheck="false" placeholder="/home/user/micromamba/envs/cloudlink-gpu">
+          </label>
         </div>
         <div class="command-box">
           <div class="modal-note">生成后复制命令到本地计算节点终端执行。命令使用短期安装 token，不包含长期 worker 密钥。Windows 电脑请先进入 WSL，然后选择 Linux。</div>
@@ -848,6 +863,22 @@ def dashboard_html() -> str:
             <button id="worker-install-copy" type="button">复制命令</button>
           </div>
           <div class="modal-note" id="worker-install-meta"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="worker-uninstall-modal" role="dialog" aria-modal="true">
+    <div class="modal">
+      <div class="modal-head">
+        <h2 class="panel-title">卸载本地算力节点</h2>
+        <button id="worker-uninstall-close" type="button">关闭</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-note">请在对应节点终端执行。只有脚本成功停止服务并回执后，控制台才会移除节点；任务、数据、环境、结果和日志会保留。</div>
+        <textarea id="worker-uninstall-command" readonly spellcheck="false"></textarea>
+        <div class="row-actions">
+          <button id="worker-uninstall-copy" type="button">复制命令</button>
         </div>
       </div>
     </div>
@@ -873,6 +904,154 @@ def dashboard_html() -> str:
     };
     const passwordState = { open: false, dirty: false };
     const workerInstallState = { open: false, dirty: false };
+    let currentLanguage = localStorage.getItem("cloudlink-language") || "en";
+    const originalAttributes = new WeakMap();
+    const translations = [
+      ["Cloudlink 调度控制台", "Cloudlink Scheduler Console"],
+      ["云端派发，本地计算", "Cloud scheduling, local compute"],
+      ["正在载入", "Loading"],
+      ["最后更新", "Last updated"],
+      ["最后检查", "Last checked"],
+      ["修改密码", "Change password"],
+      ["刷新", "Refresh"],
+      ["任务队列", "Task queue"],
+      ["本地算力节点", "Compute workers"],
+      ["服务器数据维护", "Managed server data"],
+      ["节点数据缓存", "Worker data caches"],
+      ["清理过期产物", "Purge expired artifacts"],
+      ["添加节点", "Add worker"],
+      ["任务总数", "Total tasks"],
+      ["待领取", "Pending"],
+      ["执行中", "Running"],
+      ["成功", "Success"],
+      ["失败", "Failed"],
+      ["超时", "Timeout"],
+      ["已取消", "Cancelled"],
+      ["节点在线", "Workers online"],
+      ["维护数据", "Managed data"],
+      ["本地缓存", "Local caches"],
+      ["任务", "Task"],
+      ["状态", "Status"],
+      ["类型", "Type"],
+      ["执行节点", "Worker"],
+      ["运行 / 总耗时", "Run / lifecycle"],
+      ["更新时间", "Updated"],
+      ["操作", "Actions"],
+      ["数据集", "Dataset"],
+      ["版本", "Version"],
+      ["来源", "Source"],
+      ["体积", "Size"],
+      ["服务端位置", "Server path"],
+      ["节点", "Worker"],
+      ["占用", "Usage"],
+      ["本地位置", "Local path"],
+      ["关闭", "Close"],
+      ["取消", "Cancel"],
+      ["保存设置", "Save settings"],
+      ["节点设置", "Worker settings"],
+      ["最大并发", "Maximum concurrency"],
+      ["任务路径", "Job path"],
+      ["数据盘", "Dataset volume"],
+      ["添加数据盘", "Add dataset volume"],
+      ["系统保留", "System reserve"],
+      ["内存 GB", "Memory GB"],
+      ["任务盘 GB", "Job disk GB"],
+      ["GPU 显存 GB", "GPU memory GB"],
+      ["修改控制台密码", "Change console password"],
+      ["当前密码", "Current password"],
+      ["新密码", "New password"],
+      ["确认新密码", "Confirm password"],
+      ["保存密码", "Save password"],
+      ["添加本地算力节点", "Add compute worker"],
+      ["更新本地算力节点", "Update compute worker"],
+      ["系统", "System"],
+      ["显示名称", "Display name"],
+      ["GPU 节点", "GPU worker"],
+      ["否", "No"],
+      ["是，仅 Linux", "Yes, Linux only"],
+      ["micromamba 环境完整路径", "Full micromamba environment path"],
+      ["生成安装命令", "Generate install command"],
+      ["复制命令", "Copy command"],
+      ["卸载本地算力节点", "Uninstall compute worker"],
+      ["任务详情", "Task details"],
+      ["详情", "Details"],
+      ["在线", "Online"],
+      ["离线", "Offline"],
+      ["需要更新", "Update required"],
+      ["不支持系统", "Unsupported system"],
+      ["并发", "Concurrency"],
+      ["可调度资源与硬盘状态（当前可用 / 上限）", "Schedulable resources and disk status (available / limit)"],
+      ["任务盘", "Job disk"],
+      ["GPU 显存", "GPU memory"],
+      ["可用", "Available"],
+      ["不可用", "Unavailable"],
+      ["待验证", "Pending validation"],
+      ["删除服务器数据", "Delete managed data"],
+      ["释放服务器副本", "Release server copy"],
+      ["删除本地缓存", "Delete local cache"],
+      ["暂无任务记录", "No task records"],
+      ["暂无注册节点", "No registered workers"],
+      ["暂无服务器维护数据", "No managed server data"],
+      ["暂无节点数据缓存", "No worker data caches"],
+      ["获取部署命令", "Get deployment command"],
+      ["卸载节点", "Uninstall worker"],
+      ["设置节点", "Worker settings"],
+      ["重试", "Retry"],
+      ["个任务", " tasks"],
+      ["在线", " online"],
+      ["份数据", " datasets"],
+      ["条缓存", " caches"],
+      ["连接失败", "Connection failed"],
+    ];
+
+    function translatedText(value) {
+      let result = value;
+      const orderedTranslations = [...translations].sort(
+        ([left], [right]) => right.length - left.length,
+      );
+      for (const [zh, en] of orderedTranslations) result = result.split(zh).join(en);
+      return result;
+    }
+
+    function translateNode(node) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        if (!node.__cloudlinkZh) node.__cloudlinkZh = node.nodeValue;
+        const nextValue = currentLanguage === "zh"
+          ? node.__cloudlinkZh
+          : translatedText(node.__cloudlinkZh);
+        if (node.nodeValue !== nextValue) node.nodeValue = nextValue;
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      let originals = originalAttributes.get(node);
+      if (!originals) {
+        originals = {};
+        originalAttributes.set(node, originals);
+      }
+      for (const attribute of ["placeholder", "title", "aria-label"]) {
+        if (!node.hasAttribute(attribute)) continue;
+        if (!(attribute in originals)) originals[attribute] = node.getAttribute(attribute);
+        node.setAttribute(
+          attribute,
+          currentLanguage === "zh"
+            ? originals[attribute]
+            : translatedText(originals[attribute]),
+        );
+      }
+      for (const child of node.childNodes) translateNode(child);
+    }
+
+    function applyLanguage(language) {
+      currentLanguage = language === "zh" ? "zh" : "en";
+      localStorage.setItem("cloudlink-language", currentLanguage);
+      document.documentElement.lang = currentLanguage === "zh" ? "zh-CN" : "en";
+      translateNode(document.body);
+      document.title = currentLanguage === "zh"
+        ? "Cloudlink 调度控制台"
+        : "Cloudlink Scheduler Console";
+      document.getElementById("language-toggle").textContent =
+        currentLanguage === "zh" ? "EN" : "中文";
+    }
 
     const taskStatusLabels = {
       pending: "待领取",
@@ -1039,6 +1218,7 @@ def dashboard_html() -> str:
         ? worker.configured_dataset_roots
         : [];
       const runtime = worker.runtime_profile || {};
+      const gpuRuntime = runtime.gpu_runtime || {};
       if (configured.length) return configured;
       if (Array.isArray(runtime.dataset_roots) && runtime.dataset_roots.length) {
         return runtime.dataset_roots;
@@ -1115,6 +1295,7 @@ def dashboard_html() -> str:
               ${state(workerEffectiveStatus(worker), workerStatusLabels)}
               <button class="icon-button" type="button" title="获取部署命令" aria-label="获取部署命令" data-open-worker-install-command="${esc(workerId)}">⇩</button>
               <button class="icon-button" type="button" title="设置" aria-label="设置节点" data-open-worker-settings="${esc(workerId)}">⚙</button>
+              <button class="icon-button danger" type="button" title="卸载节点" aria-label="卸载节点" data-open-worker-uninstall="${esc(workerId)}">×</button>
             </div>
           </div>
           <div class="worker-stats">
@@ -1123,6 +1304,7 @@ def dashboard_html() -> str:
           </div>
           ${worker.version_status === "unsupported_platform" ? `<div class="muted">原生 Windows worker 不再支持，请在 WSL 中选择 Linux 重新部署。</div>` : ""}
           ${worker.needs_update && worker.version_status !== "unsupported_platform" ? `<div class="muted">worker ${esc(worker.worker_version || "未知版本")}，最低要求 ${esc(worker.minimum_worker_version || worker.required_version || "-")}</div>` : ""}
+          ${gpuRuntime.enabled ? `<div class="muted">GPU ${gpuRuntime.verified ? "已验证" : `不可用：${esc(gpuRuntime.error || "环境验证失败")}`}</div>` : ""}
           ${reserveSyncLine(worker)}
           <div class="worker-paths">
             <div>任务盘 <span class="mono">${esc(runtime.job_root || "-")}</span></div>
@@ -1136,6 +1318,12 @@ def dashboard_html() -> str:
             ${resourceRow("内存", scheduler.memory_bytes, capacity.memory_bytes, bytes)}
             ${resourceRow("任务盘", workerDiskTotal(worker, "job"), workerDiskFree(worker, "job"), bytes)}
             ${resourceRow("数据盘", workerDiskTotal(worker, "dataset"), workerDiskFree(worker, "dataset"), bytes)}
+            ${(scheduler.gpu_devices || []).map((device) => resourceRow(
+              `GPU ${device.name || ""}`,
+              device.memory_bytes,
+              (capacity.gpu_devices || []).find((item) => item.name === device.name)?.memory_bytes,
+              bytes,
+            )).join("")}
           </div>
         </article>
       `;
@@ -1252,6 +1440,11 @@ def dashboard_html() -> str:
       document.querySelectorAll("[data-open-worker-install-command]").forEach((button) => {
         button.addEventListener("click", () => {
           openWorkerInstallModal(button.dataset.openWorkerInstallCommand);
+        });
+      });
+      document.querySelectorAll("[data-open-worker-uninstall]").forEach((button) => {
+        button.addEventListener("click", () => {
+          openWorkerUninstallModal(button.dataset.openWorkerUninstall);
         });
       });
     }
@@ -1598,6 +1791,11 @@ def dashboard_html() -> str:
         : "macos";
       document.getElementById("worker-install-id").value = worker?.worker_id || "";
       document.getElementById("worker-install-name").value = worker?.display_name || worker?.worker_id || "";
+      const gpuEnabled = Boolean(worker?.gpu_requested);
+      document.getElementById("worker-install-gpu").value = gpuEnabled ? "1" : "0";
+      document.getElementById("worker-install-gpu-path").value =
+        worker?.gpu_environment_path || worker?.runtime_profile?.gpu_runtime?.environment_path || "";
+      updateGpuInstallFields();
       document.getElementById("worker-install-command").value = "";
       document.getElementById("worker-install-meta").textContent = "";
       document.getElementById("worker-install-modal").classList.add("show");
@@ -1621,10 +1819,20 @@ def dashboard_html() -> str:
       const platform = document.getElementById("worker-install-platform").value;
       const workerId = document.getElementById("worker-install-id").value.trim();
       const displayName = document.getElementById("worker-install-name").value.trim();
+      const gpuRequested = document.getElementById("worker-install-gpu").value === "1";
+      const gpuEnvironmentPath = document.getElementById("worker-install-gpu-path").value.trim();
       const button = document.getElementById("worker-install-generate");
       if (!workerId) {
         showNotice("请先填写节点 ID，再生成安装命令。");
         document.getElementById("worker-install-id").focus();
+        return;
+      }
+      if (gpuRequested && platform !== "linux") {
+        showNotice("GPU 节点目前只支持 Linux 或 WSL。");
+        return;
+      }
+      if (gpuRequested && !gpuEnvironmentPath.startsWith("/")) {
+        showNotice("GPU 节点必须填写 micromamba 环境的完整绝对路径。");
         return;
       }
       button.disabled = true;
@@ -1637,6 +1845,8 @@ def dashboard_html() -> str:
             platform,
             worker_id: workerId || null,
             display_name: displayName || null,
+            gpu_requested: gpuRequested,
+            gpu_environment_path: gpuRequested ? gpuEnvironmentPath : null,
           }),
         });
         if (!response.ok) throw new Error(await response.text());
@@ -1652,6 +1862,27 @@ def dashboard_html() -> str:
       }
     }
 
+    function updateGpuInstallFields() {
+      const enabled = document.getElementById("worker-install-gpu").value === "1";
+      document.getElementById("worker-install-gpu-path-field").hidden = !enabled;
+    }
+
+    async function openWorkerUninstallModal(workerId) {
+      if (!confirm(`确认生成 ${workerId} 的卸载命令？正在执行任务的节点不会被卸载。`)) return;
+      try {
+        const response = await fetch(
+          `/api/admin/workers/${encodeURIComponent(workerId)}/uninstall-invite`,
+          {method: "POST", credentials: "same-origin"},
+        );
+        if (!response.ok) throw new Error(await response.text());
+        const invite = await response.json();
+        document.getElementById("worker-uninstall-command").value = invite.command;
+        document.getElementById("worker-uninstall-modal").classList.add("show");
+      } catch (error) {
+        showNotice(`生成卸载命令失败：${error.message}`);
+      }
+    }
+
     async function copyWorkerInstallCommand() {
       const command = document.getElementById("worker-install-command").value.trim();
       if (!command) {
@@ -1664,6 +1895,18 @@ def dashboard_html() -> str:
       } catch {
         document.getElementById("worker-install-command").select();
         showNotice("已选中安装命令，可以手动复制。");
+      }
+    }
+
+    async function copyWorkerUninstallCommand() {
+      const input = document.getElementById("worker-uninstall-command");
+      const command = input.value.trim();
+      if (!command) return;
+      try {
+        await navigator.clipboard.writeText(command);
+        showNotice("卸载命令已复制。");
+      } catch {
+        input.select();
       }
     }
 
@@ -1805,9 +2048,13 @@ def dashboard_html() -> str:
           <td>
             <div class="path-cell mono">${esc(dataset.server_path)}</div>
             ${dataset.original_path ? `<div class="muted mono">来源 ${esc(dataset.original_path)}</div>` : ""}
+            ${dataset.server_copy_status === "released" ? `<div class="state cancelled">服务器副本已释放</div>` : ""}
           </td>
           <td>
             <div class="row-actions">
+              ${["owned_file", "owned_archive"].includes(dataset.source_kind) && dataset.server_copy_status !== "released"
+                ? `<button data-release-dataset="${esc(dataset.id)}" type="button">释放服务器副本</button>`
+                : ""}
               <button class="danger" data-delete-dataset="${esc(dataset.id)}" type="button">删除服务器数据</button>
             </div>
           </td>
@@ -1826,6 +2073,60 @@ def dashboard_html() -> str:
           await refresh();
         });
       });
+      document.querySelectorAll("[data-release-dataset]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const id = button.dataset.releaseDataset;
+          const endpoint = `/api/admin/datasets/${encodeURIComponent(id)}/release-server-copy`;
+          const preview = await fetch(endpoint, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({dry_run: true, reason: "Released from dashboard"}),
+          });
+          if (!preview.ok) {
+            showNotice(`释放预检失败：${await preview.text()}`);
+            return;
+          }
+          const plan = await preview.json();
+          if (!confirm(`确认释放服务器副本？预计释放 ${bytes(plan.estimated_bytes)}。元数据和 worker 缓存会保留。`)) return;
+          const response = await fetch(endpoint, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({dry_run: false, reason: "Released from dashboard"}),
+          });
+          if (!response.ok) showNotice(`释放失败：${await response.text()}`);
+          await refresh();
+        });
+      });
+    }
+
+    async function purgeExpiredArtifacts() {
+      const preview = await fetch("/api/admin/storage/artifacts/purge", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({dry_run: true, reason: "Manual dashboard cleanup"}),
+      });
+      if (!preview.ok) {
+        showNotice(`产物清理预检失败：${await preview.text()}`);
+        return;
+      }
+      const plan = await preview.json();
+      if (!plan.candidate_count) {
+        showNotice("没有已超过 24 小时保留期的任务产物。");
+        return;
+      }
+      if (!confirm(`确认清理 ${plan.candidate_count} 个过期产物，预计释放 ${bytes(plan.estimated_bytes)}？`)) return;
+      const response = await fetch("/api/admin/storage/artifacts/purge", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({dry_run: false, reason: "Manual dashboard cleanup"}),
+      });
+      if (!response.ok) showNotice(`产物清理失败：${await response.text()}`);
+      else showNotice("过期任务产物已清理。");
+      await refresh();
     }
 
     function renderDatasetsIfChanged(datasets) {
@@ -1971,9 +2272,18 @@ def dashboard_html() -> str:
     document.getElementById("worker-install-close").addEventListener("click", () => closeWorkerInstallModal());
     document.getElementById("worker-install-generate").addEventListener("click", generateWorkerInstallCommand);
     document.getElementById("worker-install-copy").addEventListener("click", copyWorkerInstallCommand);
-    ["worker-install-platform", "worker-install-id", "worker-install-name"].forEach((id) => {
+    ["worker-install-platform", "worker-install-id", "worker-install-name", "worker-install-gpu", "worker-install-gpu-path"].forEach((id) => {
       document.getElementById(id).addEventListener("input", markWorkerInstallDirty);
       document.getElementById(id).addEventListener("change", markWorkerInstallDirty);
+    });
+    document.getElementById("worker-install-gpu").addEventListener("change", updateGpuInstallFields);
+    document.getElementById("worker-uninstall-close").addEventListener("click", () => {
+      document.getElementById("worker-uninstall-modal").classList.remove("show");
+    });
+    document.getElementById("worker-uninstall-copy").addEventListener("click", copyWorkerUninstallCommand);
+    document.getElementById("purge-artifacts").addEventListener("click", purgeExpiredArtifacts);
+    document.getElementById("language-toggle").addEventListener("click", () => {
+      applyLanguage(currentLanguage === "zh" ? "en" : "zh");
     });
     document.getElementById("worker-install-modal").addEventListener("click", (event) => {
       if (event.target.id === "worker-install-modal") closeWorkerInstallModal();
@@ -1983,7 +2293,15 @@ def dashboard_html() -> str:
       else if (event.key === "Escape" && isWorkerSettingsOpen()) closeWorkerSettings();
       else if (event.key === "Escape" && isPasswordModalOpen()) closePasswordModal();
       else if (event.key === "Escape" && isWorkerInstallModalOpen()) closeWorkerInstallModal();
+      else if (event.key === "Escape") document.getElementById("worker-uninstall-modal").classList.remove("show");
     });
+    const languageObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) translateNode(node);
+      }
+    });
+    applyLanguage(currentLanguage);
+    languageObserver.observe(document.body, {childList: true, subtree: true});
     refresh().catch((error) => {
       document.getElementById("updated").textContent = "连接失败";
       showNotice(`载入失败：${error.message}`);

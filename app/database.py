@@ -54,7 +54,11 @@ CREATE TABLE IF NOT EXISTS worker_nodes (
     updated_at TEXT NOT NULL,
     last_seen_at TEXT,
     last_claimed_at TEXT,
-    last_error TEXT
+    last_error TEXT,
+    lifecycle_status TEXT NOT NULL DEFAULT 'active',
+    lifecycle_updated_at TEXT,
+    gpu_requested INTEGER NOT NULL DEFAULT 0,
+    gpu_environment_path TEXT
 );
 
 CREATE TABLE IF NOT EXISTS datasets (
@@ -83,6 +87,9 @@ CREATE TABLE IF NOT EXISTS dataset_versions (
     created_by TEXT NOT NULL,
     created_at TEXT NOT NULL,
     deleted_at TEXT,
+    server_copy_status TEXT NOT NULL DEFAULT 'available',
+    server_copy_released_at TEXT,
+    server_copy_release_reason TEXT,
     UNIQUE(dataset_id, version),
     FOREIGN KEY(dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
 );
@@ -128,6 +135,10 @@ CREATE TABLE IF NOT EXISTS task_artifacts (
     required INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    expires_at TEXT,
+    purged_at TEXT,
+    purge_reason TEXT,
+    purged_size_bytes INTEGER NOT NULL DEFAULT 0,
     UNIQUE(task_id, relative_path),
     FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
@@ -150,11 +161,83 @@ CREATE TABLE IF NOT EXISTS worker_install_invites (
     public_base_url TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     used_at TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    gpu_requested INTEGER NOT NULL DEFAULT 0,
+    gpu_environment_path TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_worker_install_invites_expires
 ON worker_install_invites (expires_at, used_at);
+
+CREATE TABLE IF NOT EXISTS worker_uninstall_invites (
+    token_hash TEXT PRIMARY KEY,
+    token_preview TEXT NOT NULL,
+    worker_id TEXT NOT NULL,
+    public_base_url TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    begun_at TEXT,
+    completed_at TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_worker_uninstall_invites_expires
+ON worker_uninstall_invites (expires_at, completed_at);
+
+CREATE TABLE IF NOT EXISTS worker_lifecycle_audit (
+    id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    platform TEXT,
+    action TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    details TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_worker_lifecycle_audit_worker
+ON worker_lifecycle_audit (worker_id, created_at);
+
+CREATE TABLE IF NOT EXISTS storage_cleanup_runs (
+    id TEXT PRIMARY KEY,
+    cleanup_type TEXT NOT NULL,
+    dry_run INTEGER NOT NULL,
+    requested_by TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    filter_json TEXT NOT NULL,
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    processed_count INTEGER NOT NULL DEFAULT 0,
+    skipped_count INTEGER NOT NULL DEFAULT 0,
+    estimated_bytes INTEGER NOT NULL DEFAULT 0,
+    released_bytes INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS storage_cleanup_items (
+    run_id TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, object_type, object_id, action),
+    FOREIGN KEY(run_id) REFERENCES storage_cleanup_runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS artifact_download_leases (
+    id TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(artifact_id) REFERENCES task_artifacts(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifact_download_leases_expiry
+ON artifact_download_leases (artifact_id, expires_at);
 """
 
 
@@ -269,9 +352,72 @@ def init_db() -> None:
         )
         ensure_column(
             conn,
+            "worker_nodes",
+            "lifecycle_status",
+            "lifecycle_status TEXT NOT NULL DEFAULT 'active'",
+        )
+        ensure_column(
+            conn,
+            "worker_nodes",
+            "lifecycle_updated_at",
+            "lifecycle_updated_at TEXT",
+        )
+        ensure_column(
+            conn,
+            "worker_nodes",
+            "gpu_requested",
+            "gpu_requested INTEGER NOT NULL DEFAULT 0",
+        )
+        ensure_column(
+            conn,
+            "worker_nodes",
+            "gpu_environment_path",
+            "gpu_environment_path TEXT",
+        )
+        ensure_column(
+            conn,
+            "worker_install_invites",
+            "gpu_requested",
+            "gpu_requested INTEGER NOT NULL DEFAULT 0",
+        )
+        ensure_column(
+            conn,
+            "worker_install_invites",
+            "gpu_environment_path",
+            "gpu_environment_path TEXT",
+        )
+        ensure_column(
+            conn,
             "worker_dataset_caches",
             "data_root_path",
             "data_root_path TEXT",
+        )
+        ensure_column(
+            conn,
+            "dataset_versions",
+            "server_copy_status",
+            "server_copy_status TEXT NOT NULL DEFAULT 'available'",
+        )
+        ensure_column(
+            conn,
+            "dataset_versions",
+            "server_copy_released_at",
+            "server_copy_released_at TEXT",
+        )
+        ensure_column(
+            conn,
+            "dataset_versions",
+            "server_copy_release_reason",
+            "server_copy_release_reason TEXT",
+        )
+        ensure_column(conn, "task_artifacts", "expires_at", "expires_at TEXT")
+        ensure_column(conn, "task_artifacts", "purged_at", "purged_at TEXT")
+        ensure_column(conn, "task_artifacts", "purge_reason", "purge_reason TEXT")
+        ensure_column(
+            conn,
+            "task_artifacts",
+            "purged_size_bytes",
+            "purged_size_bytes INTEGER NOT NULL DEFAULT 0",
         )
         backfill_worker_install_platforms(conn)
         backfill_legacy_task_submitters(conn)

@@ -53,6 +53,8 @@ def create_worker_install_invite(
     display_name: Optional[str],
     public_base_url: str,
     ttl_minutes: int,
+    gpu_requested: bool = False,
+    gpu_environment_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     normalized_platform = platform.strip().lower()
     if normalized_platform not in VALID_INSTALL_PLATFORMS:
@@ -60,6 +62,22 @@ def create_worker_install_invite(
     resolved_worker_id = (worker_id or "").strip()
     if not resolved_worker_id:
         raise WorkerInstallInviteError("worker_id is required")
+    if any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for ch in resolved_worker_id):
+        raise WorkerInstallInviteError(
+            "worker_id may contain only letters, numbers, dot, underscore, and hyphen"
+        )
+    resolved_gpu_path = (gpu_environment_path or "").strip()
+    if gpu_requested:
+        if normalized_platform != "linux":
+            raise WorkerInstallInviteError("GPU workers currently require Linux")
+        if not resolved_gpu_path.startswith("/"):
+            raise WorkerInstallInviteError(
+                "gpu_environment_path must be an absolute Linux path"
+            )
+    elif resolved_gpu_path:
+        raise WorkerInstallInviteError(
+            "gpu_environment_path requires gpu_requested=true"
+        )
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     resolved_display_name = (display_name or "").strip() or resolved_worker_id
@@ -67,9 +85,10 @@ def create_worker_install_invite(
         """
         INSERT INTO worker_install_invites (
             token_hash, token_preview, worker_id, display_name, platform,
-            public_base_url, expires_at, created_at
+            public_base_url, expires_at, created_at,
+            gpu_requested, gpu_environment_path
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             token_hash(token),
@@ -80,6 +99,8 @@ def create_worker_install_invite(
             public_base_url.rstrip("/"),
             (now + timedelta(minutes=ttl_minutes)).isoformat(),
             now.isoformat(),
+            1 if gpu_requested else 0,
+            resolved_gpu_path or None,
         ),
     )
     invite = get_worker_install_invite(conn, token)

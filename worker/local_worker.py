@@ -15,6 +15,7 @@ try:
     from worker.artifact_manager import ResultArtifactUploader
     from worker.config import WorkerConfig, WorkerConfigError, load_worker_config
     from worker.dataset_manager import DatasetManager
+    from worker.gpu_runtime import validate_gpu_runtime
     from worker.hardware import collect_worker_profiles
     from worker.script_runner import ScriptExecutionTimeout, run_script_job
 except ModuleNotFoundError:  # pragma: no cover - supports direct script execution.
@@ -22,6 +23,7 @@ except ModuleNotFoundError:  # pragma: no cover - supports direct script executi
     from artifact_manager import ResultArtifactUploader
     from config import WorkerConfig, WorkerConfigError, load_worker_config
     from dataset_manager import DatasetManager
+    from gpu_runtime import validate_gpu_runtime
     from hardware import collect_worker_profiles
     from script_runner import ScriptExecutionTimeout, run_script_job
 
@@ -57,6 +59,8 @@ class CloudWorker:
         self.capacity_state: Dict[str, Any] = {}
         self.server_reserve_overrides: Dict[str, Any] = {}
         self.current_job_root = self.default_job_root()
+        self.last_gpu_validation_at = 0.0
+        self.gpu_runtime_profile = self.validate_gpu_runtime_best_effort()
         self.api_client = api_client or WorkerApiClient(
             base_url=self.config.base_url,
             worker_secret=self.config.worker_secret,
@@ -74,6 +78,29 @@ class CloudWorker:
             download_retries=self.config.api_retries,
         )
         self.refresh_worker_profiles()
+
+    def gpu_runtime_env(self) -> Dict[str, str]:
+        return {
+            **os.environ,
+            "CLOUDLINK_GPU_ENABLED": "1" if self.config.gpu_enabled else "0",
+            "CLOUDLINK_GPU_ENVIRONMENT_PATH": self.config.gpu_environment_path or "",
+            "CLOUDLINK_MICROMAMBA_EXE": self.config.micromamba_executable or "",
+        }
+
+    def validate_gpu_runtime_best_effort(self) -> Dict[str, Any]:
+        self.last_gpu_validation_at = time.time()
+        if not self.config.gpu_enabled:
+            return {"enabled": False, "verified": False}
+        try:
+            return validate_gpu_runtime(self.gpu_runtime_env())
+        except Exception as exc:
+            return {
+                "enabled": True,
+                "verified": False,
+                "error": str(exc),
+                "environment_path": self.config.gpu_environment_path,
+                "micromamba_executable": self.config.micromamba_executable,
+            }
 
     def log(self, message: str) -> None:
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
@@ -128,6 +155,11 @@ class CloudWorker:
         ).expanduser()
 
     def refresh_worker_profiles(self) -> None:
+        if (
+            self.config.gpu_enabled
+            and time.time() - self.last_gpu_validation_at >= 600
+        ):
+            self.gpu_runtime_profile = self.validate_gpu_runtime_best_effort()
         (
             self.hardware_profile,
             self.runtime_profile,
@@ -139,6 +171,7 @@ class CloudWorker:
             worker_id=self.worker_id,
             python_runtime=self.python_runtime(),
             reserve_overrides=self.reserve_overrides(),
+            gpu_runtime_profile=self.gpu_runtime_profile,
         )
 
     def active_task_count(self) -> int:
@@ -361,7 +394,13 @@ class CloudWorker:
             logs = traceback.format_exc()
             self.log(f"task {task_id} failed: {exc}")
             try:
-                self.report_failed(task_id, lease_id, str(exc), logs)
+                self.report_failed(
+                    task_id,
+                    lease_id,
+                    str(exc),
+                    logs,
+                    error_code=getattr(exc, "error_code", None),
+                )
             except Exception as report_exc:
                 self.log(f"failed to report task failure for {task_id}: {report_exc}")
         finally:

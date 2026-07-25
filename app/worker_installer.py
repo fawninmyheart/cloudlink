@@ -61,6 +61,9 @@ def worker_env_text(
     worker_secret: str,
     worker_id: str,
     supported_types: Iterable[str],
+    gpu_enabled: bool = False,
+    gpu_environment_path: str = "",
+    micromamba_executable: str = "",
 ) -> str:
     supported = ",".join(sorted(set(supported_types)))
     return "\n".join(
@@ -83,6 +86,9 @@ def worker_env_text(
             "CLOUDLINK_DATASET_ROOT=$HOME/.cloudlink/datasets",
             "CLOUDLINK_BASE_PYTHON=python3",
             "CLOUDLINK_AUTO_INSTALL_REQUIREMENTS=1",
+            f"CLOUDLINK_GPU_ENABLED={1 if gpu_enabled else 0}",
+            f"CLOUDLINK_GPU_ENVIRONMENT_PATH={gpu_environment_path}",
+            f"CLOUDLINK_MICROMAMBA_EXE={micromamba_executable}",
             "CLOUDLINK_ARTIFACT_CHUNK_BYTES=4194304",
             "CLOUDLINK_ARTIFACT_UPLOAD_RETRIES=6",
             "CLOUDLINK_ARTIFACT_RETRY_BASE_SECONDS=2",
@@ -98,18 +104,125 @@ def worker_install_command(platform: str, script_url: str) -> str:
     return f"curl -fsSL {script_url} | bash"
 
 
-def render_posix_install_script(*, base_url: str, token: str, package_sha256: str) -> str:
+def worker_uninstall_command(script_url: str) -> str:
+    return f"curl -fsSL {script_url} | bash"
+
+
+def render_posix_uninstall_script(
+    *,
+    base_url: str,
+    token: str,
+    platform: str,
+    worker_id: str,
+) -> str:
+    if platform not in {"macos", "linux"}:
+        raise ValueError("worker uninstall platform must be macos or linux")
+    service_id = "".join(
+        char if char.isalnum() or char in "._-" else "-"
+        for char in worker_id
+    )
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_URL="{base_url.rstrip("/")}"
+TOKEN="{token}"
+WORKER_ID="{worker_id}"
+PLATFORM="{platform}"
+SERVICE_ID="{service_id}"
+INSTALL_DIR="${{CLOUDLINK_INSTALL_DIR:-$HOME/.cloudlink/worker}}"
+ENV_FILE="$INSTALL_DIR/current/scripts/local_worker.env"
+SECRET_FILE="$HOME/.cloudlink/worker_secret"
+
+WORKER_SECRET=""
+if [[ -f "$ENV_FILE" ]]; then
+  WORKER_SECRET="$(sed -n 's/^WORKER_SECRET=//p' "$ENV_FILE" | tail -1)"
+fi
+if [[ -z "$WORKER_SECRET" && -f "$SECRET_FILE" ]]; then
+  WORKER_SECRET="$(tr -d '\\r\\n' < "$SECRET_FILE")"
+fi
+[[ -n "$WORKER_SECRET" ]] || {{ echo "Cloudlink worker secret was not found." >&2; exit 2; }}
+
+curl -fsSL -X POST "$BASE_URL/uninstall/worker/$TOKEN/begin" \
+  -H "X-Worker-Secret: $WORKER_SECRET" \
+  -H "Content-Type: application/json" \
+  --data "{{\\"worker_id\\":\\"$WORKER_ID\\"}}" >/dev/null
+
+if [[ "$PLATFORM" == "linux" ]]; then
+  sudo systemctl disable --now "cloudlink-worker-$SERVICE_ID.service" 2>/dev/null || true
+  sudo rm -f "/etc/systemd/system/cloudlink-worker-$SERVICE_ID.service"
+  sudo systemctl daemon-reload
+else
+  launchctl bootout "gui/$(id -u)/com.cloudlink.worker.$SERVICE_ID" 2>/dev/null || true
+  rm -f "$HOME/Library/LaunchAgents/com.cloudlink.worker.$SERVICE_ID.plist"
+fi
+
+rm -rf "$INSTALL_DIR/current"
+rm -f "$SECRET_FILE"
+
+curl -fsSL -X POST "$BASE_URL/uninstall/worker/$TOKEN/complete" \
+  -H "X-Worker-Secret: $WORKER_SECRET" \
+  -H "Content-Type: application/json" \
+  --data "{{\\"worker_id\\":\\"$WORKER_ID\\"}}"
+echo
+echo "Cloudlink worker removed. Jobs, datasets, environments, outputs, and logs were preserved."
+"""
+
+
+def render_posix_install_script(
+    *,
+    base_url: str,
+    token: str,
+    package_sha256: str,
+    platform: str,
+    worker_id: str,
+    gpu_requested: bool = False,
+    gpu_environment_path: str = "",
+) -> str:
+    if platform not in {"macos", "linux"}:
+        raise ValueError("worker install platform must be macos or linux")
+    service_id = "".join(
+        char if char.isalnum() or char in "._-" else "-"
+        for char in worker_id
+    )
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
 BASE_URL="{base_url.rstrip("/")}"
 TOKEN="{token}"
 PACKAGE_SHA256="{package_sha256}"
+INSTALL_PLATFORM="{platform}"
+WORKER_ID="{worker_id}"
+SERVICE_ID="{service_id}"
+GPU_REQUESTED="{1 if gpu_requested else 0}"
+GPU_ENVIRONMENT_PATH="{gpu_environment_path}"
 INSTALL_DIR="${{CLOUDLINK_INSTALL_DIR:-$HOME/.cloudlink/worker}}"
 PYTHON_BIN="${{CLOUDLINK_BASE_PYTHON:-python3}}"
 TMP_DIR="$(mktemp -d)"
 cleanup() {{ rm -rf "$TMP_DIR"; }}
 trap cleanup EXIT
+
+if [[ "$INSTALL_PLATFORM" == "linux" ]]; then
+  [[ "$(uname -s)" == "Linux" ]] || {{ echo "This invite requires Linux or WSL." >&2; exit 2; }}
+  command -v systemctl >/dev/null 2>&1 || {{ echo "systemd is required." >&2; exit 2; }}
+  command -v sudo >/dev/null 2>&1 || {{ echo "sudo is required to install the worker service." >&2; exit 2; }}
+else
+  [[ "$(uname -s)" == "Darwin" ]] || {{ echo "This invite requires macOS." >&2; exit 2; }}
+  command -v launchctl >/dev/null 2>&1 || {{ echo "launchd is required." >&2; exit 2; }}
+fi
+
+MICROMAMBA_EXE=""
+if [[ "$GPU_REQUESTED" == "1" ]]; then
+  [[ -d "$GPU_ENVIRONMENT_PATH" ]] || {{ echo "GPU environment does not exist: $GPU_ENVIRONMENT_PATH" >&2; exit 2; }}
+  MICROMAMBA_EXE="$(command -v micromamba || true)"
+  [[ -n "$MICROMAMBA_EXE" ]] || {{ echo "micromamba is not available in PATH." >&2; exit 2; }}
+  [[ -x "$MICROMAMBA_EXE" ]] || {{ echo "micromamba is not executable." >&2; exit 2; }}
+fi
+
+if [[ "$INSTALL_PLATFORM" == "linux" ]]; then
+  sudo systemctl stop "cloudlink-worker-$SERVICE_ID.service" 2>/dev/null || true
+else
+  launchctl bootout "gui/$(id -u)/com.cloudlink.worker.$SERVICE_ID" 2>/dev/null || true
+fi
 
 mkdir -p "$INSTALL_DIR"
 chmod 700 "$INSTALL_DIR" 2>/dev/null || true
@@ -136,16 +249,37 @@ find . -type f -name "*.py" -exec touch {{}} +
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
 
+export CLOUDLINK_GPU_ENABLED="$GPU_REQUESTED"
+export CLOUDLINK_GPU_ENVIRONMENT_PATH="$GPU_ENVIRONMENT_PATH"
+export CLOUDLINK_MICROMAMBA_EXE="$MICROMAMBA_EXE"
+if [[ "$GPU_REQUESTED" == "1" ]]; then
+  command -v nvidia-smi >/dev/null 2>&1 || {{ echo "nvidia-smi is not available inside Linux/WSL." >&2; exit 2; }}
+  nvidia-smi >/dev/null
+  .venv/bin/python - <<'PY'
+from worker.gpu_runtime import validate_gpu_runtime
+profile = validate_gpu_runtime()
+print(
+    "Validated GPU runtime: "
+    f"torch={{profile.get('torch_version')}} "
+    f"cuda={{profile.get('torch_cuda_version')}} "
+    f"gpus={{profile.get('gpu_count')}}"
+)
+PY
+fi
+
 export CLOUDLINK_INSTALL_BASE_URL="$BASE_URL"
 export CLOUDLINK_INSTALL_TOKEN="$TOKEN"
+export MICROMAMBA_EXE
 REGISTER_BODY="$(.venv/bin/python - <<'PY'
 import json
+import os
 import platform
 import socket
 
 print(json.dumps({{
     "hostname": socket.gethostname(),
     "platform": platform.system().lower(),
+    "micromamba_executable": os.environ.get("MICROMAMBA_EXE") or None,
 }}))
 PY
 )"
@@ -173,11 +307,55 @@ print(f"Registered Cloudlink worker {{data['worker_id']}}")
 PY
 
 scripts/start_local_worker.sh doctor scripts/local_worker.env
-if pgrep -f "worker.local_worker" >/dev/null 2>&1; then
-  pkill -f "worker.local_worker" || true
-  sleep 2
-  echo "Existing Cloudlink worker processes stopped."
+mkdir -p "$HOME/.cloudlink/logs"
+if [[ "$INSTALL_PLATFORM" == "linux" ]]; then
+  SERVICE_FILE="$TMP_DIR/cloudlink-worker-$SERVICE_ID.service"
+  cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=Cloudlink Worker $WORKER_ID
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$(id -un)
+WorkingDirectory=$INSTALL_DIR/current
+ExecStart=$INSTALL_DIR/current/scripts/start_local_worker.sh $INSTALL_DIR/current/scripts/local_worker.env
+Restart=always
+RestartSec=5
+StandardOutput=append:$HOME/.cloudlink/logs/worker.log
+StandardError=append:$HOME/.cloudlink/logs/worker.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo install -m 0644 "$SERVICE_FILE" "/etc/systemd/system/cloudlink-worker-$SERVICE_ID.service"
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now "cloudlink-worker-$SERVICE_ID.service"
+  sudo systemctl --no-pager --full status "cloudlink-worker-$SERVICE_ID.service" || true
+else
+  PLIST="$HOME/Library/LaunchAgents/com.cloudlink.worker.$SERVICE_ID.plist"
+  mkdir -p "$HOME/Library/LaunchAgents"
+  cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.cloudlink.worker.$SERVICE_ID</string>
+  <key>ProgramArguments</key><array>
+    <string>$INSTALL_DIR/current/scripts/start_local_worker.sh</string>
+    <string>$INSTALL_DIR/current/scripts/local_worker.env</string>
+  </array>
+  <key>WorkingDirectory</key><string>$INSTALL_DIR/current</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$HOME/.cloudlink/logs/worker.log</string>
+  <key>StandardErrorPath</key><string>$HOME/.cloudlink/logs/worker.log</string>
+</dict></plist>
+EOF
+  chmod 600 "$PLIST"
+  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  launchctl enable "gui/$(id -u)/com.cloudlink.worker.$SERVICE_ID"
+  launchctl kickstart -k "gui/$(id -u)/com.cloudlink.worker.$SERVICE_ID"
 fi
-nohup scripts/start_local_worker.sh scripts/local_worker.env > "$HOME/.cloudlink/worker.log" 2>&1 &
-echo "Cloudlink worker started. Log: $HOME/.cloudlink/worker.log"
+echo "Cloudlink worker service installed. Log: $HOME/.cloudlink/logs/worker.log"
 """

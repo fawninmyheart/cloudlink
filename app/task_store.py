@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from app.config import Settings, get_settings
+from app.dataset_store import released_dataset_ids, worker_has_verified_caches
 from app.resource_model import (
     ResourceValidationError,
     fits_capacity,
@@ -94,6 +95,7 @@ def row_to_worker(row: sqlite3.Row, online_seconds: int) -> Dict[str, Any]:
     worker.pop("worker_secret_hash", None)
     worker["supported_types"] = json.loads(worker["supported_types"])
     worker["enabled"] = bool(worker["enabled"])
+    worker["gpu_requested"] = bool(worker.get("gpu_requested"))
     worker["hardware_profile"] = (
         json.loads(worker["hardware_profile"]) if worker.get("hardware_profile") else None
     )
@@ -156,6 +158,7 @@ def worker_uses_unsupported_platform(worker: Dict[str, Any]) -> bool:
 def worker_is_schedulable(worker: Dict[str, Any]) -> bool:
     return (
         bool(worker.get("enabled"))
+        and worker.get("lifecycle_status", "active") == "active"
         and bool(worker.get("online"))
         and not bool(worker.get("needs_update"))
     )
@@ -335,15 +338,38 @@ def create_task(
     validate_text_size(description, settings)
     check_pending_limit(conn, settings)
     resource_request = normalize_task_resource_request(task_type, payload)
-    if has_resource_requirements(resource_request):
+    runtime = str(payload.get("runtime") or "python-auto").strip()
+    gpu_required = bool((resource_request.get("gpu") or {}).get("required"))
+    if task_type == "script_job" and (runtime == "pytorch-cuda") != gpu_required:
+        raise ResourceUnsatisfiable(
+            {
+                "code": "gpu_runtime_declaration_invalid",
+                "message": (
+                    "pytorch-cuda runtime and resource_request.gpu.required=true "
+                    "must be declared together."
+                ),
+            }
+        )
+    if has_resource_requirements(resource_request) or runtime == "pytorch-cuda":
         rejection = resource_request_rejection(
             conn,
             task_type,
             resource_request,
             settings,
+            payload=payload,
         )
         if rejection is not None:
             raise ResourceUnsatisfiable(rejection)
+
+    dataset_rejection = dataset_availability_rejection(
+        conn,
+        task_type,
+        payload,
+        resource_request,
+        settings,
+    )
+    if dataset_rejection is not None:
+        raise ResourceUnsatisfiable(dataset_rejection)
 
     task_id = str(uuid.uuid4())
     normalized_submitter = normalize_submitter_id(submitter_id)
@@ -511,6 +537,8 @@ def register_worker(
     max_concurrent_tasks: int = 1,
     active_task_count: int = 0,
     worker_secret_hash: Optional[str] = None,
+    gpu_requested: bool = False,
+    gpu_environment_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     settings = get_settings()
     allowed_supported = sorted(set(supported_types) & settings.allowed_task_types)
@@ -528,9 +556,10 @@ def register_worker(
             worker_id, display_name, supported_types, install_platform, enabled,
             hardware_profile, runtime_profile, capacity_state, worker_secret_hash,
             max_concurrent_tasks, active_task_count,
-            registered_at, updated_at
+            registered_at, updated_at, lifecycle_status, lifecycle_updated_at,
+            gpu_requested, gpu_environment_path
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
         ON CONFLICT(worker_id) DO UPDATE SET
             display_name = excluded.display_name,
             supported_types = excluded.supported_types,
@@ -542,6 +571,10 @@ def register_worker(
             worker_secret_hash = COALESCE(excluded.worker_secret_hash, worker_nodes.worker_secret_hash),
             max_concurrent_tasks = excluded.max_concurrent_tasks,
             active_task_count = excluded.active_task_count,
+            lifecycle_status = 'active',
+            lifecycle_updated_at = excluded.lifecycle_updated_at,
+            gpu_requested = excluded.gpu_requested,
+            gpu_environment_path = excluded.gpu_environment_path,
             updated_at = excluded.updated_at
         """,
         (
@@ -564,6 +597,9 @@ def register_worker(
             active_task_count,
             now,
             now,
+            now,
+            1 if gpu_requested else 0,
+            gpu_environment_path,
         ),
     )
     return get_worker(conn, worker_id)
@@ -795,6 +831,7 @@ def queue_status(conn: sqlite3.Connection) -> Dict[str, Any]:
     settings = get_settings()
     now = utc_now()
     expire_pending_tasks(conn, now, settings.queue_timeout_seconds)
+    expire_unavailable_dataset_tasks(conn, settings)
     counts = task_summary(conn)
     oldest = conn.execute(
         """
@@ -1040,6 +1077,7 @@ def resource_request_rejection(
     task_type: str,
     resource_request: Dict[str, Any],
     settings: Settings,
+    payload: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     workers = list_workers(conn)
     candidates = [
@@ -1049,6 +1087,7 @@ def resource_request_rejection(
         and not worker.get("needs_update")
         and task_type in worker["supported_types"]
         and task_type in settings.allowed_task_types
+        and worker_supports_runtime(worker, payload or {})
     ]
     shortages = []
     for worker in candidates:
@@ -1080,6 +1119,125 @@ def resource_request_rejection(
     }
 
 
+def worker_supports_runtime(worker: Dict[str, Any], payload: Dict[str, Any]) -> bool:
+    runtime = str(payload.get("runtime") or "python-auto").strip()
+    if runtime != "pytorch-cuda":
+        return True
+    gpu_runtime = (worker.get("runtime_profile") or {}).get("gpu_runtime") or {}
+    return bool(
+        worker.get("gpu_requested")
+        and gpu_runtime.get("enabled")
+        and gpu_runtime.get("verified")
+    )
+
+
+def cpu_worker_currently_available(
+    conn: sqlite3.Connection,
+    *,
+    exclude_worker_id: str,
+    task_type: str,
+    resource_request: Dict[str, Any],
+) -> bool:
+    for candidate in list_workers(conn):
+        gpu_runtime = (candidate.get("runtime_profile") or {}).get("gpu_runtime") or {}
+        if (
+            candidate["worker_id"] != exclude_worker_id
+            and worker_is_schedulable(candidate)
+            and task_type in candidate.get("supported_types", [])
+            and not gpu_runtime.get("enabled")
+            and running_task_count(conn, candidate["worker_id"])
+            < int(candidate.get("max_concurrent_tasks") or 1)
+        ):
+            available = subtract_running_reservations(
+                conn,
+                candidate["worker_id"],
+                worker_current_capacity(candidate),
+            )
+            if fits_capacity(resource_request, available)[0]:
+                return True
+    return False
+
+
+def dataset_availability_rejection(
+    conn: sqlite3.Connection,
+    task_type: str,
+    payload: Dict[str, Any],
+    resource_request: Dict[str, Any],
+    settings: Settings,
+) -> Optional[Dict[str, Any]]:
+    released = released_dataset_ids(conn, payload.get("datasets") or [])
+    if not released:
+        return None
+    eligible = []
+    for worker in list_workers(conn):
+        if (
+            worker_is_schedulable(worker)
+            and task_type in worker.get("supported_types", [])
+            and worker_supports_runtime(worker, payload)
+            and worker_has_verified_caches(conn, worker["worker_id"], released)
+            and fits_capacity(resource_request, worker_ideal_capacity(worker))[0]
+        ):
+            eligible.append(worker["worker_id"])
+    if eligible:
+        return None
+    return {
+        "code": "dataset_unavailable",
+        "message": (
+            "No online schedulable worker has verified caches for every released "
+            "dataset required by this task."
+        ),
+        "released_dataset_version_ids": released,
+        "eligible_worker_ids": [],
+    }
+
+
+def expire_unavailable_dataset_tasks(
+    conn: sqlite3.Connection,
+    settings: Settings,
+) -> int:
+    rows = conn.execute(
+        "SELECT * FROM tasks WHERE status = 'pending' ORDER BY created_at ASC"
+    ).fetchall()
+    expired = 0
+    now = utc_now()
+    for row in rows:
+        task = row_to_task(row)
+        released = released_dataset_ids(
+            conn,
+            task["payload"].get("datasets") or [],
+        )
+        if not released:
+            continue
+        rejection = dataset_availability_rejection(
+            conn,
+            task["type"],
+            task["payload"],
+            task["resource_request"] or normalize_resource_request({}),
+            settings,
+        )
+        if rejection is None:
+            continue
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'failed',
+                error_code = 'dataset_became_unavailable',
+                error = ?,
+                updated_at = ?,
+                finished_at = ?
+            WHERE id = ? AND status = 'pending'
+            """,
+            (
+                "Required released dataset cache is no longer available",
+                now,
+                now,
+                task["id"],
+            ),
+        )
+        expired += 1
+    return expired
+
+
 def claim_task(
     conn: sqlite3.Connection,
     worker_id: str,
@@ -1097,6 +1255,7 @@ def claim_task(
             raise WorkerNotRegistered(worker_id)
 
         expire_pending_tasks(conn, now, settings.queue_timeout_seconds)
+        expire_unavailable_dataset_tasks(conn, settings)
         expire_locked_tasks(conn, now, settings.task_max_retries)
         registered_supported = set(worker["supported_types"])
         allowed_supported = sorted(
@@ -1112,6 +1271,9 @@ def claim_task(
         )
         worker = get_worker(conn, worker_id)
         if worker.get("needs_update"):
+            conn.execute("COMMIT")
+            return None
+        if worker.get("lifecycle_status", "active") != "active":
             conn.execute("COMMIT")
             return None
         if not allowed_supported:
@@ -1154,6 +1316,28 @@ def claim_task(
         )
         for candidate in rows:
             candidate_task = row_to_task(candidate)
+            if not worker_supports_runtime(worker, candidate_task["payload"]):
+                continue
+            request_gpu = (candidate_task["resource_request"] or {}).get("gpu") or {}
+            worker_gpu = (worker.get("runtime_profile") or {}).get("gpu_runtime") or {}
+            if (
+                not request_gpu.get("required")
+                and worker_gpu.get("enabled")
+                and cpu_worker_currently_available(
+                    conn,
+                    exclude_worker_id=worker_id,
+                    task_type=candidate_task["type"],
+                    resource_request=candidate_task["resource_request"]
+                    or normalize_resource_request({}),
+                )
+            ):
+                continue
+            released = released_dataset_ids(
+                conn,
+                candidate_task["payload"].get("datasets") or [],
+            )
+            if released and not worker_has_verified_caches(conn, worker_id, released):
+                continue
             resource_request = (
                 candidate_task["resource_request"] or normalize_resource_request({})
             )
@@ -1247,6 +1431,26 @@ def script_timeout_seconds(payload: Dict[str, Any]) -> int:
         return 0
 
 
+def set_task_artifact_expiry(
+    conn: sqlite3.Connection,
+    task_id: str,
+    terminal_at: str,
+) -> None:
+    expires_at = (
+        parse_utc(terminal_at)
+        + timedelta(seconds=get_settings().artifact_retention_seconds)
+    ).isoformat()
+    conn.execute(
+        """
+        UPDATE task_artifacts
+        SET expires_at = COALESCE(expires_at, ?),
+            updated_at = ?
+        WHERE task_id = ?
+        """,
+        (expires_at, terminal_at, task_id),
+    )
+
+
 def _assert_owned_running_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -1325,6 +1529,7 @@ def cancel_task(
         """,
         (message, now, now, task_id),
     )
+    set_task_artifact_expiry(conn, task_id, now)
     return get_task(conn, task_id)
 
 
@@ -1358,6 +1563,7 @@ def report_success(
         """,
         (json.dumps(result, ensure_ascii=False), logs, now, now, task_id),
     )
+    set_task_artifact_expiry(conn, task_id, now)
     return get_task(conn, task_id)
 
 
@@ -1393,4 +1599,5 @@ def report_failed(
         """,
         (status, error, normalized_error_code, logs, now, now, task_id),
     )
+    set_task_artifact_expiry(conn, task_id, now)
     return get_task(conn, task_id)

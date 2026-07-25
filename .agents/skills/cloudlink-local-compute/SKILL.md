@@ -149,6 +149,15 @@ Ownership rule: Codex CLI internal queries only return tasks submitted by the sa
 
 If Cloudlink rejects task creation with `resource_request_unsatisfiable`, handle it automatically. Reduce scope, split the workload, stream or batch input data, lower concurrency, or request less memory/disk and resubmit. Do not ask the user just because the scheduler rejected an oversized first attempt. Only report back after repeated automatic reductions still cannot produce a valid task.
 
+GPU jobs must declare both `--runtime pytorch-cuda` and GPU resources such as
+`--gpu-required --gpu-count 1 --gpu-memory-gb 8`. Submit them only when status
+shows an online worker with `runtime_profile.gpu_runtime.verified=true`.
+Requirements on `pytorch-cuda` tasks are validation constraints; Cloudlink does
+not install or change packages in the user's micromamba environment. On
+`gpu_runtime_unavailable` or `runtime_dependency_missing`, do not retry by
+adding pip installs. Report the exact missing/conflicting environment component
+and ask the user to maintain that micromamba environment.
+
 ## Script Contract
 
 Generate one Python script file. The script must:
@@ -200,6 +209,10 @@ For important outputs:
 - Declare expected outputs with `--expected-artifact`.
 - Ask the script to write `outputs/cloudlink_artifacts.json` with actual result meaning and metrics when those details are known only after execution.
 - If `result.output_files` contains `stored_on_server=true`, download it through `/api/internal/tasks/<task_id>/artifacts/<artifact_id>/download`.
+- Cloudlink task artifacts expire 24 hours after terminal completion. Download
+  every result needed for future reasoning into the current project/worktree
+  immediately. Never treat Cloudlink as permanent result storage; HTTP `410`
+  means the retention window has elapsed.
 
 ## Dependency Rules
 
@@ -235,6 +248,15 @@ When a task needs K-line data, tick data, model files, archives, or other large 
 4. In the script, read `CLOUDLINK_DATASET_<MOUNT_NAME>` or `datasets.json`.
 
 Do not embed large CSV, JSON, or binary data in `script_job.payload`.
+
+Dataset metadata may report `server_copy_status=released`. In that state,
+Cloudlink has no downloadable server copy. Submit only when the service accepts
+the task based on an online worker holding a checksum-verified cache for every
+released dataset. `dataset_unavailable` means no eligible holder exists at
+submission; `dataset_became_unavailable` means the eligible holder disappeared
+while pending. In either case, automatically choose a different maintained
+dataset, recreate a server-managed copy when appropriate, or revise the task.
+Do not keep submitting an impossible cache-only task.
 
 Register a plain Codex-generated file. Cloudlink copies files from
 `CLOUDLINK_CODEX_DATASET_SOURCE_ROOTS` into its trusted managed data directory;
@@ -386,6 +408,9 @@ If `status` is `failed` or `timeout`:
 
 - Inspect `error`, `logs`, `result.stderr` if present, and output files.
 - Inspect `error_code`; `queue_timeout` means the job never reached a worker, while `execution_timeout` means the Python script exceeded its declared `--timeout`.
+- `dataset_unavailable` rejects submission because no online eligible verified
+  cache holder exists. `dataset_became_unavailable` terminates a pending task
+  after its last eligible cache holder disappears.
 - Fix the generated script or dependency list before retrying.
 - Do not retry the same failing payload blindly.
 - If task creation fails with `resource_request_unsatisfiable`, automatically revise the resource plan and resubmit a smaller or more parallel-friendly job. Do not ask the user unless automatic reductions cannot produce a feasible plan.

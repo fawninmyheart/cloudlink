@@ -32,6 +32,9 @@ class WorkerConfig:
     reserve_job_disk_bytes: Optional[int] = None
     reserve_dataset_disk_bytes: Optional[int] = None
     reserve_gpu_memory_bytes: Optional[int] = None
+    gpu_enabled: bool = False
+    gpu_environment_path: Optional[str] = None
+    micromamba_executable: Optional[str] = None
 
 
 def csv_list(value: str) -> List[str]:
@@ -97,6 +100,10 @@ def _optional_gb_bytes(env: Mapping[str, str], name: str) -> Optional[int]:
     if value is None:
         return None
     return int(value * 1024**3)
+
+
+def _bool(env: Mapping[str, str], name: str, default: str = "0") -> bool:
+    return _env(env, name, default).lower() in {"1", "true", "yes", "on"}
 
 
 def load_worker_config(env: Optional[Mapping[str, str]] = None) -> WorkerConfig:
@@ -181,4 +188,7 @@ def load_worker_config(env: Optional[Mapping[str, str]] = None) -> WorkerConfig:
             source,
             "WORKER_RESERVE_GPU_MEMORY_GB",
         ),
+        gpu_enabled=_bool(source, "CLOUDLINK_GPU_ENABLED"),
+        gpu_environment_path=_env(source, "CLOUDLINK_GPU_ENVIRONMENT_PATH") or None,
+        micromamba_executable=_env(source, "CLOUDLINK_MICROMAMBA_EXE") or None,
     )

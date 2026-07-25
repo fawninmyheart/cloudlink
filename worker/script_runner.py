@@ -8,12 +8,18 @@ from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 try:
+    from worker.gpu_runtime import (
+        micromamba_python_command,
+        validate_gpu_requirements,
+    )
     from worker.runtime_manager import ensure_python_auto_runtime
 except ModuleNotFoundError:  # pragma: no cover - supports direct script execution.
+    from gpu_runtime import micromamba_python_command, validate_gpu_requirements
     from runtime_manager import ensure_python_auto_runtime
 
 
 PYTHON_AUTO_RUNTIMES = {"python-auto", "python3-auto", "python3.12-auto"}
+GPU_RUNTIMES = {"pytorch-cuda"}
 SAFE_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -50,11 +56,16 @@ def run_script_job(
     write_input_files(job_dir, payload.get("input_files", []))
     write_dataset_manifest(job_dir, dataset_records or [])
     requirements = normalize_requirements_payload(payload.get("requirements", []))
-    python_path = ensure_python_auto_runtime(requirements)
+    if runtime == "pytorch-cuda":
+        validate_gpu_requirements(requirements)
+        command_prefix = micromamba_python_command()
+    else:
+        python_path = ensure_python_auto_runtime(requirements)
+        command_prefix = [str(python_path)]
 
     args = normalize_string_list(payload.get("args", []), "args")
     timeout_seconds = bounded_timeout(payload.get("timeout_seconds"))
-    command = [str(python_path), str(entrypoint_path)] + args
+    command = command_prefix + [str(entrypoint_path)] + args
     try:
         completed = subprocess.run(
             command,
@@ -104,9 +115,13 @@ def normalize_runtime(value: Any) -> str:
     if not isinstance(value, str):
         raise ValueError("runtime must be a string")
     runtime = value.strip()
-    if runtime not in PYTHON_AUTO_RUNTIMES:
-        raise ValueError("runtime must be one of: python-auto, python3-auto, python3.12-auto")
-    return "python-auto"
+    if runtime in PYTHON_AUTO_RUNTIMES:
+        return "python-auto"
+    if runtime in GPU_RUNTIMES:
+        return runtime
+    raise ValueError(
+        "runtime must be one of: python-auto, python3-auto, python3.12-auto, pytorch-cuda"
+    )
 
 
 def build_job_dir(task_id: Optional[str]) -> Path:

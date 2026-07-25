@@ -17,6 +17,10 @@ class ArtifactNotFound(Exception):
     pass
 
 
+class ArtifactGone(Exception):
+    pass
+
+
 def data_root() -> Path:
     return Path(os.getenv("CLOUDLINK_DATA_ROOT", "/opt/cloudlink/data")).expanduser().resolve()
 
@@ -382,6 +386,8 @@ def complete_artifact_upload(
 
 def get_uploaded_artifact_path(conn: sqlite3.Connection, artifact_id: str) -> Path:
     artifact = get_artifact(conn, artifact_id)
+    if artifact["status"] in {"purging", "purged"}:
+        raise ArtifactGone(artifact_id)
     if artifact["status"] != "uploaded":
         raise ArtifactConflict("artifact is not uploaded")
     path = Path(artifact["storage_path"])

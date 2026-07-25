@@ -1,6 +1,8 @@
 import hashlib
 import json
 import secrets
+import threading
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -16,6 +18,7 @@ from sqlite3 import Connection
 from app.admin_store import set_admin_password, verify_admin_credentials
 from app.artifact_store import (
     ArtifactConflict,
+    ArtifactGone,
     ArtifactNotFound,
     artifact_upload_status,
     complete_artifact_upload,
@@ -28,7 +31,7 @@ from app.artifact_store import (
 )
 from app.config import get_settings
 from app.dashboard import dashboard_html
-from app.database import get_connection, init_db
+from app.database import connect, get_connection, init_db
 from app.dataset_store import (
     DatasetConflict,
     DatasetNotFound,
@@ -82,16 +85,77 @@ from app.task_store import (
     update_worker_settings,
     verify_worker_secret,
 )
+from app.storage_cleanup import (
+    StorageObjectGone,
+    create_download_lease,
+    purge_expired_artifacts,
+    release_dataset_server_copy,
+)
 from app.worker_installer import (
     build_worker_package,
     render_posix_install_script,
+    render_posix_uninstall_script,
     worker_package_sha256,
     worker_env_text,
     worker_install_command,
+    worker_uninstall_command,
+)
+from app.worker_lifecycle_store import (
+    WorkerUninstallInviteError,
+    WorkerUninstallInviteExpired,
+    WorkerUninstallInviteNotFound,
+    archive_lost_worker,
+    begin_worker_uninstall,
+    complete_worker_uninstall,
+    create_worker_uninstall_invite,
+    get_worker_uninstall_invite,
 )
 
 
-app = FastAPI(title="Cloudlink Task Queue")
+cleanup_thread: Optional[threading.Thread] = None
+cleanup_stop_event = threading.Event()
+
+
+def artifact_cleanup_loop() -> None:
+    while not cleanup_stop_event.wait(
+        get_settings().artifact_cleanup_interval_seconds
+    ):
+        try:
+            with connect() as conn:
+                purge_expired_artifacts(
+                    conn,
+                    dry_run=False,
+                    requested_by="automatic",
+                    reason="24-hour artifact retention expired",
+                )
+        except Exception:
+            # Cleanup is retryable and must never take down scheduling.
+            continue
+
+
+def start_artifact_cleanup() -> None:
+    global cleanup_thread
+    if cleanup_thread and cleanup_thread.is_alive():
+        return
+    cleanup_stop_event.clear()
+    cleanup_thread = threading.Thread(
+        target=artifact_cleanup_loop,
+        name="cloudlink-artifact-cleanup",
+        daemon=True,
+    )
+    cleanup_thread.start()
+
+
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    start_artifact_cleanup()
+    try:
+        yield
+    finally:
+        cleanup_stop_event.set()
+
+
+app = FastAPI(title="Cloudlink Task Queue", lifespan=app_lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 init_db()
 basic_auth = HTTPBasic()
@@ -142,6 +206,8 @@ class RegisterWorkerRequest(BaseModel):
     capacity_state: Optional[Dict[str, Any]] = None
     max_concurrent_tasks: int = 1
     active_task_count: int = 0
+    gpu_requested: bool = False
+    gpu_environment_path: Optional[str] = None
 
 
 class HeartbeatRequest(BaseModel):
@@ -223,11 +289,27 @@ class CreateWorkerInstallInviteRequest(BaseModel):
     platform: str = Field(min_length=1)
     worker_id: Optional[str] = None
     display_name: Optional[str] = None
+    gpu_requested: bool = False
+    gpu_environment_path: Optional[str] = None
 
 
 class WorkerInstallRegisterRequest(BaseModel):
     hostname: Optional[str] = None
     platform: Optional[str] = None
+    micromamba_executable: Optional[str] = None
+
+
+class WorkerUninstallRequest(BaseModel):
+    worker_id: str = Field(min_length=1)
+
+
+class ArchiveLostWorkerRequest(BaseModel):
+    reason: str = ""
+
+
+class StorageCleanupRequest(BaseModel):
+    dry_run: bool = True
+    reason: str = ""
 
 
 class CreateArtifactRequest(BaseModel):
@@ -348,6 +430,8 @@ def map_store_error(error: Exception) -> HTTPException:
         return HTTPException(status_code=404, detail="Task not found")
     if isinstance(error, ArtifactNotFound):
         return HTTPException(status_code=404, detail="Artifact not found")
+    if isinstance(error, (ArtifactGone, StorageObjectGone)):
+        return HTTPException(status_code=410, detail="Stored content has expired")
     if isinstance(error, DatasetNotFound):
         return HTTPException(status_code=404, detail="Dataset not found")
     if isinstance(error, WorkerNotRegistered):
@@ -395,6 +479,16 @@ def map_install_invite_error(error: Exception) -> HTTPException:
     if isinstance(error, (WorkerInstallInviteExpired, WorkerInstallInviteUsed)):
         return HTTPException(status_code=410, detail=str(error))
     if isinstance(error, WorkerInstallInviteError):
+        return HTTPException(status_code=400, detail=str(error))
+    return map_store_error(error)
+
+
+def map_uninstall_invite_error(error: Exception) -> HTTPException:
+    if isinstance(error, WorkerUninstallInviteNotFound):
+        return HTTPException(status_code=404, detail=str(error))
+    if isinstance(error, WorkerUninstallInviteExpired):
+        return HTTPException(status_code=410, detail=str(error))
+    if isinstance(error, WorkerUninstallInviteError):
         return HTTPException(status_code=400, detail=str(error))
     return map_store_error(error)
 
@@ -580,6 +674,8 @@ def api_admin_create_worker_install_invite(
             display_name=body.display_name,
             public_base_url=base_url,
             ttl_minutes=settings.worker_install_invite_ttl_minutes,
+            gpu_requested=body.gpu_requested,
+            gpu_environment_path=body.gpu_environment_path,
         )
     except Exception as exc:
         raise map_install_invite_error(exc) from exc
@@ -593,6 +689,8 @@ def api_admin_create_worker_install_invite(
         "script_url": script_url,
         "package_url": package_url,
         "package_sha256": package_sha256,
+        "gpu_requested": bool(invite.get("gpu_requested")),
+        "gpu_environment_path": invite.get("gpu_environment_path"),
         "command": worker_install_command(invite["platform"], script_url),
     }
 
@@ -610,6 +708,10 @@ def api_worker_install_shell_script(
             base_url=invite["public_base_url"],
             token=token,
             package_sha256=worker_package_sha256(),
+            platform=invite["platform"],
+            worker_id=invite["worker_id"],
+            gpu_requested=bool(invite.get("gpu_requested")),
+            gpu_environment_path=invite.get("gpu_environment_path") or "",
         )
     except Exception as exc:
         raise map_install_invite_error(exc) from exc
@@ -658,6 +760,17 @@ def api_worker_install_register(
             install_platform=invite["platform"],
             enabled=True,
             worker_secret_hash=hash_worker_secret(worker_secret),
+            runtime_profile={
+                "install_platform": invite["platform"],
+                "gpu_runtime": {
+                    "enabled": bool(invite.get("gpu_requested")),
+                    "verified": False,
+                    "environment_path": invite.get("gpu_environment_path"),
+                    "micromamba_executable": body.micromamba_executable,
+                },
+            },
+            gpu_requested=bool(invite.get("gpu_requested")),
+            gpu_environment_path=invite.get("gpu_environment_path"),
         )
         mark_worker_install_invite_used(conn, token)
     except Exception as exc:
@@ -673,8 +786,114 @@ def api_worker_install_register(
             worker_secret=worker_secret,
             worker_id=worker["worker_id"],
             supported_types=supported_types,
+            gpu_enabled=bool(invite.get("gpu_requested")),
+            gpu_environment_path=invite.get("gpu_environment_path") or "",
+            micromamba_executable=body.micromamba_executable or "",
         ),
     }
+
+
+@app.post(
+    "/api/admin/workers/{worker_id}/uninstall-invite",
+    dependencies=[Depends(require_admin_auth)],
+)
+def api_admin_create_worker_uninstall_invite(
+    worker_id: str,
+    request: Request,
+    conn: Connection = Depends(get_connection),
+) -> Dict[str, Any]:
+    settings = get_settings()
+    base_url = public_base_url(request)
+    validate_worker_install_base_url(base_url)
+    try:
+        invite = create_worker_uninstall_invite(
+            conn,
+            worker_id=worker_id,
+            public_base_url=base_url,
+            ttl_minutes=settings.worker_uninstall_invite_ttl_minutes,
+        )
+    except Exception as exc:
+        raise map_uninstall_invite_error(exc) from exc
+    script_url = f"{base_url}/uninstall/worker/{invite['token']}/uninstall.sh"
+    return {
+        "worker_id": worker_id,
+        "expires_at": invite["expires_at"],
+        "script_url": script_url,
+        "command": worker_uninstall_command(script_url),
+    }
+
+
+@app.get(
+    "/uninstall/worker/{token}/uninstall.sh",
+    response_class=PlainTextResponse,
+)
+def api_worker_uninstall_shell_script(
+    token: str,
+    conn: Connection = Depends(get_connection),
+) -> str:
+    try:
+        invite = get_worker_uninstall_invite(conn, token)
+        worker = get_worker(conn, invite["worker_id"])
+        return render_posix_uninstall_script(
+            base_url=invite["public_base_url"],
+            token=token,
+            platform=worker.get("install_platform") or "linux",
+            worker_id=worker["worker_id"],
+        )
+    except Exception as exc:
+        raise map_uninstall_invite_error(exc) from exc
+
+
+@app.post("/uninstall/worker/{token}/begin")
+def api_worker_uninstall_begin(
+    token: str,
+    body: WorkerUninstallRequest,
+    x_worker_secret: str = Header(default="", alias="X-Worker-Secret"),
+    conn: Connection = Depends(get_connection),
+) -> Dict[str, Any]:
+    try:
+        invite = get_worker_uninstall_invite(conn, token)
+        if invite["worker_id"] != body.worker_id:
+            raise WorkerUninstallInviteError("Worker does not match uninstall invite")
+        return begin_worker_uninstall(conn, token, x_worker_secret)
+    except Exception as exc:
+        raise map_uninstall_invite_error(exc) from exc
+
+
+@app.post("/uninstall/worker/{token}/complete")
+def api_worker_uninstall_complete(
+    token: str,
+    body: WorkerUninstallRequest,
+    x_worker_secret: str = Header(default="", alias="X-Worker-Secret"),
+    conn: Connection = Depends(get_connection),
+) -> Dict[str, Any]:
+    try:
+        invite = get_worker_uninstall_invite(conn, token)
+        if invite["worker_id"] != body.worker_id:
+            raise WorkerUninstallInviteError("Worker does not match uninstall invite")
+        return complete_worker_uninstall(conn, token, x_worker_secret)
+    except Exception as exc:
+        raise map_uninstall_invite_error(exc) from exc
+
+
+@app.post(
+    "/api/admin/workers/{worker_id}/archive-lost",
+    dependencies=[Depends(require_admin_auth)],
+)
+def api_admin_archive_lost_worker(
+    worker_id: str,
+    body: ArchiveLostWorkerRequest,
+    conn: Connection = Depends(get_connection),
+) -> Dict[str, Any]:
+    try:
+        return archive_lost_worker(
+            conn,
+            worker_id=worker_id,
+            reason=body.reason,
+            offline_seconds=get_settings().worker_lost_archive_seconds,
+        )
+    except Exception as exc:
+        raise map_store_error(exc) from exc
 
 
 @app.get("/api/internal/status")
@@ -716,6 +935,8 @@ def api_register_worker(
             capacity_state=body.capacity_state,
             max_concurrent_tasks=body.max_concurrent_tasks,
             active_task_count=body.active_task_count,
+            gpu_requested=body.gpu_requested,
+            gpu_environment_path=body.gpu_environment_path,
         )
     except Exception as exc:
         raise map_store_error(exc) from exc
@@ -850,6 +1071,7 @@ def api_internal_download_task_artifact(
         if artifact["task_id"] != task_id:
             raise ArtifactNotFound(artifact_id)
         path = get_uploaded_artifact_path(conn, artifact_id)
+        create_download_lease(conn, artifact_id)
     except Exception as exc:
         raise map_store_error(exc) from exc
     return FileResponse(
@@ -1030,7 +1252,9 @@ def api_worker_dataset_metadata(
     return {
         **version,
         "filename": filename,
-        "download_url": (
+        "download_url": None
+        if version.get("server_copy_status") == "released"
+        else (
             f"/api/worker/datasets/{dataset_version_id}/download"
             f"?worker_id={worker_id}"
         ),
@@ -1050,6 +1274,8 @@ def api_worker_dataset_download(
     try:
         get_worker_for_api(conn, worker_id, worker_token)
         version = get_dataset_version(conn, dataset_version_id)
+        if version.get("server_copy_status") == "released":
+            raise StorageObjectGone(dataset_version_id)
     except Exception as exc:
         raise map_store_error(exc) from exc
     path = Path(version["server_path"])
@@ -1175,6 +1401,46 @@ def api_admin_delete_dataset(
     return {"status": "ok"}
 
 
+@app.post(
+    "/api/admin/datasets/{dataset_version_id}/release-server-copy",
+    dependencies=[Depends(require_admin_auth)],
+)
+def api_admin_release_dataset_server_copy(
+    dataset_version_id: str,
+    body: StorageCleanupRequest,
+    conn: Connection = Depends(get_connection),
+) -> Dict[str, Any]:
+    try:
+        return release_dataset_server_copy(
+            conn,
+            dataset_version_id,
+            dry_run=body.dry_run,
+            requested_by="admin",
+            reason=body.reason,
+        )
+    except Exception as exc:
+        raise map_store_error(exc) from exc
+
+
+@app.post(
+    "/api/admin/storage/artifacts/purge",
+    dependencies=[Depends(require_admin_auth)],
+)
+def api_admin_purge_expired_artifacts(
+    body: StorageCleanupRequest,
+    conn: Connection = Depends(get_connection),
+) -> Dict[str, Any]:
+    try:
+        return purge_expired_artifacts(
+            conn,
+            dry_run=body.dry_run,
+            requested_by="admin",
+            reason=body.reason or "Manual artifact retention cleanup",
+        )
+    except Exception as exc:
+        raise map_store_error(exc) from exc
+
+
 @app.get(
     "/api/admin/tasks/{task_id}/artifacts/{artifact_id}/download",
     dependencies=[Depends(require_admin_auth)],
@@ -1189,6 +1455,7 @@ def api_admin_download_task_artifact(
         if artifact["task_id"] != task_id:
             raise ArtifactNotFound(artifact_id)
         path = get_uploaded_artifact_path(conn, artifact_id)
+        create_download_lease(conn, artifact_id)
     except Exception as exc:
         raise map_store_error(exc) from exc
     return FileResponse(

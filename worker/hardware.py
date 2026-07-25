@@ -255,7 +255,7 @@ def _detect_nvidia_gpus() -> list[Dict[str, Any]]:
         output = subprocess.check_output(
             [
                 "nvidia-smi",
-                "--query-gpu=name,memory.total",
+                "--query-gpu=name,memory.total,memory.free,driver_version",
                 "--format=csv,noheader,nounits",
             ],
             text=True,
@@ -268,12 +268,26 @@ def _detect_nvidia_gpus() -> list[Dict[str, Any]]:
     for line in output.splitlines():
         if not line.strip() or "," not in line:
             continue
-        name, memory_mib = [part.strip() for part in line.split(",", 1)]
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 4:
+            continue
+        name, memory_mib, free_mib, driver_version = parts
         try:
             memory_bytes = int(memory_mib) * 1024**2
         except ValueError:
             memory_bytes = 0
-        devices.append({"name": name or "NVIDIA GPU", "memory_total_bytes": memory_bytes})
+        try:
+            memory_free_bytes = int(free_mib) * 1024**2
+        except ValueError:
+            memory_free_bytes = 0
+        devices.append(
+            {
+                "name": name or "NVIDIA GPU",
+                "memory_total_bytes": memory_bytes,
+                "memory_free_bytes": min(memory_free_bytes, memory_bytes),
+                "driver_version": driver_version,
+            }
+        )
     return devices
 
 
@@ -307,8 +321,9 @@ def build_runtime_profile(
     dataset_root: Path,
     dataset_roots: Optional[List[Dict[str, Any]]] = None,
     python_runtime: Optional[Path] = None,
+    gpu_runtime_profile: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    return {
+    profile = {
         "worker_id": worker_id,
         "cloudlink_version": os.getenv("CLOUDLINK_VERSION", CLOUDLINK_VERSION).strip()
         or CLOUDLINK_VERSION,
@@ -323,6 +338,10 @@ def build_runtime_profile(
         "dataset_roots": dataset_roots
         or [{"path": str(dataset_root), "mode": "active"}],
     }
+    profile["gpu_runtime"] = dict(
+        gpu_runtime_profile or {"enabled": False, "verified": False}
+    )
+    return profile
 
 
 def build_capacity_state(
@@ -363,7 +382,24 @@ def build_capacity_state(
             "dataset_disk_bytes",
             "dataset_disk_bytes",
         ),
-        "gpu_devices": scheduler.get("gpu_devices") or [],
+        "gpu_devices": [
+            {
+                **dict(device),
+                "memory_bytes": min(
+                    int(device.get("memory_bytes") or 0),
+                    max(
+                        0,
+                        int(
+                            device.get("memory_free_bytes")
+                            or device.get("memory_bytes")
+                            or 0
+                        )
+                        - int(reserve.get("gpu_memory_bytes") or 0),
+                    ),
+                ),
+            }
+            for device in (scheduler.get("gpu_devices") or [])
+        ],
     }
 
 
@@ -375,6 +411,7 @@ def collect_worker_profiles(
     worker_id: str = "",
     python_runtime: Optional[Path] = None,
     reserve_overrides: Optional[Mapping[str, Any]] = None,
+    gpu_runtime_profile: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     job_total, job_free = disk_usage(job_root)
     dataset_total, dataset_free = disk_usage(dataset_root)
@@ -394,6 +431,7 @@ def collect_worker_profiles(
         dataset_root=dataset_root,
         dataset_roots=dataset_roots,
         python_runtime=python_runtime,
+        gpu_runtime_profile=gpu_runtime_profile,
     )
     capacity_state = build_capacity_state(
         hardware_profile,

@@ -134,10 +134,14 @@ TASK_MAX_RETRIES=1
 CLOUDLINK_MAX_PENDING_TASKS=10
 CLOUDLINK_QUEUE_TIMEOUT_SECONDS=21600
 CLOUDLINK_STARVATION_PROTECTION_SECONDS=900
-CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.06.3
+CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.25.1
 WORKER_ONLINE_SECONDS=180
 TASK_ALLOWED_TYPES=echo_test,generate_daily_report,script_job
 WORKER_INSTALL_INVITE_TTL_MINUTES=30
+WORKER_UNINSTALL_INVITE_TTL_MINUTES=30
+WORKER_LOST_ARCHIVE_SECONDS=604800
+CLOUDLINK_ARTIFACT_RETENTION_SECONDS=86400
+CLOUDLINK_ARTIFACT_CLEANUP_INTERVAL_SECONDS=600
 EOF
 sudo chmod 600 /etc/cloudlink.env
 printf 'Initial Cloudlink dashboard password: %s\n' "$ADMIN_PASSWORD"
@@ -243,7 +247,7 @@ export ADMIN_USERNAME=admin
 export ADMIN_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
 export TASK_LOCK_SECONDS=1800
 export TASK_MAX_RETRIES=1
-export CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.06.3
+export CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.25.1
 export WORKER_ONLINE_SECONDS=180
 export TASK_ALLOWED_TYPES=echo_test,generate_daily_report,script_job
 export CLOUDLINK_DATA_ROOT=./data
@@ -356,13 +360,51 @@ The generated command:
 4. Installs the worker under the local user's Cloudlink directory.
 5. Creates a Python virtualenv and installs requirements.
 6. Exchanges the short-lived invite token for worker registration over HTTPS.
-7. Writes local worker configuration with restricted file permissions and starts the worker.
+7. Writes local worker configuration with restricted file permissions.
+8. Installs a persistent service: systemd on Linux/WSL or launchd on macOS.
 
 The command contains only a short-lived invite token. It does not display
 `WORKER_SECRET` in the dashboard. The worker receives a node-specific credential
 only during the HTTPS registration exchange, and that credential is stored as a
 hash on the server. `WORKER_SECRET` remains only as a compatibility fallback for
 older manually registered workers that do not yet have a node-specific secret.
+
+Worker removal is also script-confirmed. Use the remove button on the worker
+card, copy the generated command to that worker, and run it there. Cloudlink
+first blocks new claims and refuses removal while tasks are running. The script
+then removes only the worker service, installed worker code, configuration, and
+credential before confirming removal to the server. Jobs, datasets, extracted
+caches, outputs, `~/.cloudlink/venvs`, micromamba environments, and logs remain
+on disk. An offline worker can be archived as lost only after seven days; this
+revokes it and hides it from scheduling without pretending its local files were
+deleted.
+
+## Linux And WSL GPU Workers
+
+GPU workers are supported on Linux, including a Linux distribution running in
+WSL. Cloudlink does not install NVIDIA drivers, CUDA, micromamba, PyTorch, or
+model-development packages. The user owns that environment.
+
+Before generating the worker command:
+
+1. Install the NVIDIA Windows driver that supports CUDA in WSL when applicable.
+2. Confirm `nvidia-smi` works inside the Linux/WSL shell.
+3. Confirm systemd is enabled in the Linux/WSL distribution; Cloudlink uses the
+   same systemd service path as other Linux workers and does not add a `nohup`
+   fallback.
+4. Install micromamba and create a dedicated environment containing compatible
+   PyTorch, CUDA runtime packages, `transformers`, and other large dependencies.
+5. Activate the environment once to validate it, then record its absolute prefix
+   such as `/home/user/micromamba/envs/cloudlink-gpu`.
+6. In **Add worker**, choose Linux, enable GPU, and enter that prefix.
+
+The installer records the absolute micromamba executable and environment prefix.
+The worker validates `torch`, `transformers`, `torch.cuda.is_available()`, and a
+real CUDA tensor operation. It executes GPU jobs with
+`micromamba run -p <prefix> python`, so service startup does not depend on shell
+activation. GPU jobs use runtime `pytorch-cuda`; their requirement declarations
+are validation-only and Cloudlink never mutates the micromamba environment.
+Small CPU-only dependencies continue to use `python-auto`.
 
 ## Create An `echo_test` Task
 
@@ -410,7 +452,7 @@ The local worker does not call Codex CLI. It runs the submitted Python script di
 
 If the payload declares Python requirements, the worker installs missing packages into `CLOUDLINK_PYTHON_AUTO_VENV` only. It does not install packages into system Python or the project `.venv`.
 
-Files written under `outputs/` are returned in the task result. Small text files include `content`; binary files include `content_base64`; larger files are uploaded as retained result artifacts.
+Files written under `outputs/` are returned in the task result. Small text files include `content`; binary files include `content_base64`; larger files are uploaded as temporary result artifacts.
 
 ## Result Artifacts
 
@@ -431,6 +473,14 @@ so humans and cloud-side Codex CLI can understand what each result file means.
 Cloud-side Codex CLI can download uploaded artifacts through:
 
 `GET /api/internal/tasks/<task_id>/artifacts/<artifact_id>/download`
+
+Artifacts are retained for exactly 24 hours after the task reaches a terminal
+state, then automatically purged. Cloudlink is a transfer layer, not an archive.
+Codex CLI must download every result needed for later work into its own project
+directory before the deadline. Manual cleanup in the dashboard runs a dry-run
+preview before deletion; active downloads are protected, partial uploads are
+included, metadata and cleanup audit records remain, and later downloads return
+HTTP `410 Gone`.
 
 ## Manage Large Datasets
 
@@ -492,7 +542,19 @@ from pathlib import Path
 klines_path = Path(os.environ["CLOUDLINK_DATASET_KLINES"])
 ```
 
-The dashboard shows server-managed datasets and which workers have cached or extracted them. Server deletion removes only Cloudlink symlinks for `symlink_file`; it removes real Cloudlink-owned archives for `owned_archive`. Worker-local deletion removes both downloaded archives and extracted directories.
+The dashboard shows server-managed datasets and which workers have cached or
+extracted them. For `owned_file` and `owned_archive`, the dashboard can release
+only Cloudlink's managed server copy while retaining metadata and worker caches.
+The original source path and all worker files are never deleted by this action.
+After release, downloads return `410 Gone`, and new tasks are accepted only when
+one online schedulable worker has verified matching caches for every released
+dataset and enough runtime/resources. Only such a worker may claim the task. If
+the last eligible cache holder goes offline while the task is pending, the task
+fails with `dataset_became_unavailable` instead of waiting for queue timeout.
+
+Full dataset deletion removes only Cloudlink symlinks for `symlink_file`; it
+removes real Cloudlink-owned files/archives for owned kinds. Worker-local cache
+deletion removes both downloaded archives and extracted directories.
 
 On the cloud server:
 

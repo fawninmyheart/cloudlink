@@ -32,6 +32,8 @@ class Settings:
     admin_username: str
     admin_password: str
     worker_install_invite_ttl_minutes: int
+    worker_uninstall_invite_ttl_minutes: int
+    worker_lost_archive_seconds: int
     task_lock_seconds: int
     task_max_retries: int
     max_pending_tasks: int
@@ -46,6 +48,8 @@ class Settings:
     allowed_dataset_source_roots: Tuple[str, ...]
     codex_dataset_source_roots: Tuple[str, ...]
     allow_insecure_worker_install: bool
+    artifact_retention_seconds: int
+    artifact_cleanup_interval_seconds: int
 
 
 def _csv_set(value: str) -> Set[str]:
@@ -179,6 +183,14 @@ def get_settings() -> Settings:
         worker_install_invite_ttl_minutes=int(
             os.getenv("WORKER_INSTALL_INVITE_TTL_MINUTES", "30")
         ),
+        worker_uninstall_invite_ttl_minutes=_positive_int_env(
+            "WORKER_UNINSTALL_INVITE_TTL_MINUTES",
+            30,
+        ),
+        worker_lost_archive_seconds=_positive_int_env(
+            "WORKER_LOST_ARCHIVE_SECONDS",
+            7 * 24 * 60 * 60,
+        ),
         task_lock_seconds=int(os.getenv("TASK_LOCK_SECONDS", "1800")),
         task_max_retries=int(os.getenv("TASK_MAX_RETRIES", "1")),
         max_pending_tasks=_positive_int_env("CLOUDLINK_MAX_PENDING_TASKS", 10),
@@ -207,5 +219,13 @@ def get_settings() -> Settings:
         allow_insecure_worker_install=_bool_env(
             "CLOUDLINK_ALLOW_INSECURE_WORKER_INSTALL",
             False,
+        ),
+        artifact_retention_seconds=_positive_int_env(
+            "CLOUDLINK_ARTIFACT_RETENTION_SECONDS",
+            24 * 60 * 60,
+        ),
+        artifact_cleanup_interval_seconds=_positive_int_env(
+            "CLOUDLINK_ARTIFACT_CLEANUP_INTERVAL_SECONDS",
+            10 * 60,
         ),
     )

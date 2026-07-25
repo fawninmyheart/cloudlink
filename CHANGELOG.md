@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026.07.25.1
+
+### Worker Lifecycle And GPU
+
+- Replaced worker `nohup` startup with systemd on Linux/WSL and launchd on
+  macOS.
+- Added script-confirmed worker uninstall and seven-day lost-worker archival.
+  Uninstall preserves jobs, datasets, outputs, environments, and logs.
+- Added Linux/WSL NVIDIA GPU registration backed by a user-maintained
+  micromamba environment, runtime verification, dynamic free-VRAM reporting,
+  and `pytorch-cuda` task execution without environment mutation.
+
+### Storage And Scheduling
+
+- Added preview-first release of Cloudlink-owned dataset server copies with
+  retained metadata, audit history, and HTTP 410 download semantics.
+- Added checksum-verified cache-only scheduling for released datasets and
+  `dataset_became_unavailable` termination when the last eligible holder
+  disappears.
+- Added automatic 24-hour task artifact retention cleanup, partial-upload
+  cleanup, active-download protection, audit records, and preview-first manual
+  cleanup.
+- CPU tasks prefer CPU-only workers while GPU workers remain available as
+  fallback capacity.
+
+### Console And Documentation
+
+- Added default-English console localization with a persisted Chinese toggle.
+- Added GPU registration fields, worker uninstall commands, server-copy release,
+  and artifact cleanup controls without changing section-based incremental
+  refresh.
+- Documented WSL GPU setup boundaries, temporary artifact handling, and
+  cache-only dataset behavior in the README and Codex skill.
+
+### Compatibility
+
+- Server version: `2026.07.25.1`.
+- Minimum supported worker version: `2026.07.25.1`.
+- Existing workers must be updated because service management, GPU runtime
+  reporting, and scheduling contracts changed.
+
 ## 2026.07.15.1
 
 ### Installer

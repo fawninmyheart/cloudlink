@@ -46,8 +46,9 @@ def test_admin_creates_macos_worker_install_invite_without_exposing_secret(
     assert "package.tar.gz" in script.text
     assert "/register" in script.text
     assert "curl -fsSL -X POST" in script.text
-    assert 'pkill -f "worker.local_worker"' in script.text
-    assert "Existing Cloudlink worker processes stopped." in script.text
+    assert "launchctl bootstrap" in script.text
+    assert "KeepAlive" in script.text
+    assert "nohup" not in script.text
     assert "urllib.request" not in script.text
     assert "test-secret" not in script.text
     assert invite["package_sha256"] in script.text

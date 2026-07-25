@@ -404,6 +404,57 @@ def list_worker_caches_for_worker(
     return [row_to_worker_cache(row) for row in rows]
 
 
+def released_dataset_ids(
+    conn: sqlite3.Connection,
+    dataset_references: Iterable[Dict[str, Any]],
+) -> List[str]:
+    released = []
+    for reference in dataset_references:
+        if reference.get("required", True) is False:
+            continue
+        version_id = str(reference.get("dataset_version_id") or "").strip()
+        if not version_id:
+            continue
+        version = get_dataset_version(conn, version_id)
+        if version.get("server_copy_status") == "released":
+            released.append(version_id)
+    return released
+
+
+def worker_has_verified_caches(
+    conn: sqlite3.Connection,
+    worker_id: str,
+    dataset_version_ids: Iterable[str],
+) -> bool:
+    required = sorted(set(dataset_version_ids))
+    if not required:
+        return True
+    placeholders = ",".join("?" for _ in required)
+    rows = conn.execute(
+        f"""
+        SELECT
+            cache.dataset_version_id,
+            cache.status,
+            cache.checksum_sha256,
+            version.checksum_sha256 AS expected_checksum_sha256
+        FROM worker_dataset_caches AS cache
+        JOIN dataset_versions AS version ON version.id = cache.dataset_version_id
+        WHERE cache.worker_id = ?
+          AND cache.dataset_version_id IN ({placeholders})
+          AND version.deleted_at IS NULL
+        """,
+        [worker_id, *required],
+    ).fetchall()
+    verified = {
+        row["dataset_version_id"]
+        for row in rows
+        if row["status"] in {"cached", "extracted"}
+        and row["expected_checksum_sha256"]
+        and row["checksum_sha256"] == row["expected_checksum_sha256"]
+    }
+    return verified == set(required)
+
+
 def request_worker_cache_delete(
     conn: sqlite3.Connection,
     dataset_version_id: str,
