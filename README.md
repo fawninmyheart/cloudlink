@@ -363,6 +363,10 @@ The generated command:
 7. Writes local worker configuration with restricted file permissions.
 8. Installs a persistent service: systemd on Linux/WSL or launchd on macOS.
 
+Before replacing an existing worker, the installer verifies that the selected
+Python interpreter can create virtual environments. On Debian and Ubuntu it
+automatically installs the matching `pythonX.Y-venv` package when needed.
+
 The command contains only a short-lived invite token. It does not display
 `WORKER_SECRET` in the dashboard. The worker receives a node-specific credential
 only during the HTTPS registration exchange, and that credential is stored as a

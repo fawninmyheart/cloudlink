@@ -57,6 +57,11 @@ def test_admin_creates_macos_worker_install_invite_without_exposing_secret(
     assert '-name "__pycache__"' in script.text
     assert '-name "*.pyc"' in script.text
     assert '-name "*.py" -exec touch' in script.text
+    assert "ensure_python_venv" in script.text
+    assert "python3-venv" in script.text
+    assert script.text.index("ensure_python_venv") < script.text.index(
+        'launchctl bootout "gui/$(id -u)/com.cloudlink.worker.$SERVICE_ID"'
+    )
 
 
 def test_admin_rejects_windows_worker_install_invite(monkeypatch, tmp_path):

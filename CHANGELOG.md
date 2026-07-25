@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.07.26.1
+
+### Worker Installer
+
+- Added a preflight check that verifies the selected Python interpreter can
+  create virtual environments before an existing worker service is stopped.
+- Debian and Ubuntu worker installs now automatically install the matching
+  `pythonX.Y-venv` package, with `python3-venv` as a fallback.
+- Kept the minimum supported worker version at `2026.07.25.1`; this installer
+  improvement does not require existing workers to update.
+
 ## 2026.07.25.4
 
 ### Platform Cleanup

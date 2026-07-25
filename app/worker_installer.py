@@ -218,6 +218,37 @@ if [[ "$GPU_REQUESTED" == "1" ]]; then
   [[ -x "$MICROMAMBA_EXE" ]] || {{ echo "micromamba is not executable." >&2; exit 2; }}
 fi
 
+ensure_python_venv() {{
+  local probe_dir="$TMP_DIR/venv-probe"
+  if "$PYTHON_BIN" -m venv "$probe_dir" >/dev/null 2>&1; then
+    rm -rf "$probe_dir"
+    return
+  fi
+  rm -rf "$probe_dir"
+
+  if [[ "$INSTALL_PLATFORM" == "linux" ]] && command -v apt-get >/dev/null 2>&1; then
+    local versioned_package
+    versioned_package="$("$PYTHON_BIN" -c 'import sys; print(f"python{{sys.version_info.major}}.{{sys.version_info.minor}}-venv")')"
+    echo "Python venv support is missing; installing $versioned_package."
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get update
+    if ! sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "$versioned_package"; then
+      sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv
+    fi
+  else
+    echo "Python venv support is unavailable for $PYTHON_BIN." >&2
+    echo "Install the venv package for this Python interpreter, then rerun this command." >&2
+    exit 2
+  fi
+
+  if ! "$PYTHON_BIN" -m venv "$probe_dir" >/dev/null 2>&1; then
+    echo "Python venv support is still unavailable after package installation." >&2
+    exit 2
+  fi
+  rm -rf "$probe_dir"
+}}
+
+ensure_python_venv
+
 if [[ "$INSTALL_PLATFORM" == "linux" ]]; then
   sudo systemctl stop "cloudlink-worker-$SERVICE_ID.service" 2>/dev/null || true
 else
