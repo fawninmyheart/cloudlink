@@ -7,10 +7,14 @@ TEST_MINIMUM_WORKER_VERSION = "2026.07.05.2"
 TEST_WORKER_VERSION = TEST_MINIMUM_WORKER_VERSION
 
 
-def make_client(monkeypatch, tmp_path):
+def make_client(monkeypatch, tmp_path, *, minimum_gpu_worker_version=None):
     monkeypatch.setenv("CLOUDLINK_DATABASE_PATH", str(tmp_path / "tasks.db"))
     monkeypatch.setenv("CLOUDLINK_VERSION", TEST_CLOUDLINK_VERSION)
     monkeypatch.setenv("CLOUDLINK_MINIMUM_WORKER_VERSION", TEST_MINIMUM_WORKER_VERSION)
+    monkeypatch.setenv(
+        "CLOUDLINK_MINIMUM_GPU_WORKER_VERSION",
+        minimum_gpu_worker_version or TEST_MINIMUM_WORKER_VERSION,
+    )
     monkeypatch.setenv("WORKER_SECRET", "test-secret")
     monkeypatch.setenv("INTERNAL_API_SECRET", "internal-secret")
     monkeypatch.setenv("CLOUDLINK_CODEX_TOKEN", "codex-secret")
@@ -544,6 +548,53 @@ def test_worker_heartbeat_at_minimum_version_clears_update_required(monkeypatch,
 
     assert response.status_code == 200
     assert response.json()["task"]["id"] == task_id
+
+
+def test_gpu_worker_uses_gpu_specific_minimum_version(monkeypatch, tmp_path):
+    gpu_minimum = "2026.07.05.8"
+    client = make_client(
+        monkeypatch,
+        tmp_path,
+        minimum_gpu_worker_version=gpu_minimum,
+    )
+    response = client.post(
+        "/api/internal/workers",
+        headers=internal_headers(),
+        json={
+            "worker_id": "gpu-worker",
+            "display_name": "GPU Worker",
+            "supported_types": ["script_job"],
+            "enabled": True,
+            "gpu_requested": True,
+            "runtime_profile": {
+                "cloudlink_version": TEST_MINIMUM_WORKER_VERSION,
+                "gpu_runtime": {"enabled": True, "verified": True},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    worker = response.json()
+    assert worker["needs_update"] is True
+    assert worker["version_status"] == "needs_update"
+    assert worker["base_minimum_worker_version"] == TEST_MINIMUM_WORKER_VERSION
+    assert worker["gpu_minimum_worker_version"] == gpu_minimum
+    assert worker["minimum_worker_version"] == gpu_minimum
+
+
+def test_cpu_worker_keeps_base_minimum_when_gpu_minimum_is_higher(
+    monkeypatch,
+    tmp_path,
+):
+    client = make_client(
+        monkeypatch,
+        tmp_path,
+        minimum_gpu_worker_version="2026.07.05.8",
+    )
+    worker = register_worker(client)
+
+    assert worker["needs_update"] is False
+    assert worker["minimum_worker_version"] == TEST_MINIMUM_WORKER_VERSION
 
 
 def test_worker_newer_than_minimum_version_can_claim(monkeypatch, tmp_path):

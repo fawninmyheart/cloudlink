@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026.07.26.4
+
+### Capability Version Gates
+
+- Added `CLOUDLINK_MINIMUM_GPU_WORKER_VERSION`, defaulting to `2026.07.26.3`.
+- GPU workers below the GPU-specific minimum now show `needs_update` and cannot
+  claim tasks, while CPU-only workers continue using the global minimum
+  `2026.07.25.1`.
+
 ## 2026.07.26.3
 
 ### WSL GPU Detection

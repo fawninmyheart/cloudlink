@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 from typing import Dict, Set, Tuple
 
-from app.version import CLOUDLINK_VERSION, MINIMUM_WORKER_VERSION
+from app.version import (
+    CLOUDLINK_VERSION,
+    MINIMUM_GPU_WORKER_VERSION,
+    MINIMUM_WORKER_VERSION,
+)
 
 DEFAULT_ALLOWED_TYPES = "echo_test,generate_daily_report,script_job"
 INSECURE_PLACEHOLDER_VALUES = {
@@ -24,6 +28,7 @@ INSECURE_PLACEHOLDER_VALUES = {
 class Settings:
     cloudlink_version: str
     minimum_worker_version: str
+    minimum_gpu_worker_version: str
     database_path: str
     worker_secret: str
     internal_api_secret: str
@@ -173,6 +178,11 @@ def get_settings() -> Settings:
             MINIMUM_WORKER_VERSION,
         ).strip()
         or MINIMUM_WORKER_VERSION,
+        minimum_gpu_worker_version=os.getenv(
+            "CLOUDLINK_MINIMUM_GPU_WORKER_VERSION",
+            MINIMUM_GPU_WORKER_VERSION,
+        ).strip()
+        or MINIMUM_GPU_WORKER_VERSION,
         database_path=database_path,
         worker_secret=worker_secret,
         internal_api_secret=internal_api_secret,

@@ -414,6 +414,8 @@ GPU worker heartbeats report device identity, driver version, total and free
 VRAM, utilization, temperature, and power. Scheduling uses GPU count and
 available VRAM after both system reserve and running-task reservations are
 deducted. Utilization, temperature, and power are monitoring signals only.
+GPU workers can have a higher capability-specific minimum version than CPU-only
+workers, so GPU telemetry changes do not force unrelated CPU nodes to update.
 
 ## Create An `echo_test` Task
 

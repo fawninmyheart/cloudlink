@@ -128,10 +128,18 @@ def row_to_worker(row: sqlite3.Row, online_seconds: int) -> Dict[str, Any]:
 def attach_worker_version_state(worker: Dict[str, Any]) -> None:
     settings = get_settings()
     server_version = settings.cloudlink_version
-    minimum_worker_version = settings.minimum_worker_version
+    base_minimum_worker_version = settings.minimum_worker_version
+    gpu_minimum_worker_version = settings.minimum_gpu_worker_version
+    minimum_worker_version = (
+        gpu_minimum_worker_version
+        if worker.get("gpu_requested")
+        else base_minimum_worker_version
+    )
     runtime_profile = worker.get("runtime_profile") or {}
     worker_version = str(runtime_profile.get("cloudlink_version") or "").strip()
     worker["server_version"] = server_version
+    worker["base_minimum_worker_version"] = base_minimum_worker_version
+    worker["gpu_minimum_worker_version"] = gpu_minimum_worker_version
     worker["minimum_worker_version"] = minimum_worker_version
     worker["required_version"] = minimum_worker_version
     worker["worker_version"] = worker_version or None
