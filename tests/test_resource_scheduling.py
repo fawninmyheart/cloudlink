@@ -56,6 +56,46 @@ def resource_worker_payload(worker_id="worker-a", *, active=0, max_concurrent=1)
     }
 
 
+def gpu_worker_payload(*, max_concurrent=2):
+    payload = resource_worker_payload(max_concurrent=max_concurrent)
+    payload["gpu_requested"] = True
+    payload["hardware_profile"]["raw"]["gpu_devices"] = [
+        {
+            "name": "RTX 4090",
+            "memory_total_bytes": 40 * GIB,
+            "memory_free_bytes": 40 * GIB,
+            "driver_version": "581.57",
+            "utilization_percent": 10,
+            "temperature_c": 30,
+            "power_draw_watts": 20,
+            "power_limit_watts": 450,
+        }
+    ]
+    payload["hardware_profile"]["scheduler"]["gpu_devices"] = [
+        {
+            "name": "RTX 4090",
+            "memory_bytes": 40 * GIB,
+            "memory_free_bytes": 40 * GIB,
+            "driver_version": "581.57",
+            "utilization_percent": 10,
+            "temperature_c": 30,
+            "power_draw_watts": 20,
+            "power_limit_watts": 450,
+        }
+    ]
+    payload["runtime_profile"]["gpu_runtime"] = {
+        "enabled": True,
+        "verified": True,
+    }
+    payload["capacity_state"]["gpu_devices"] = [
+        {
+            "name": "RTX 4090",
+            "memory_bytes": 40 * GIB,
+        }
+    ]
+    return payload
+
+
 def create_script_job(client, resource_request):
     response = client.post(
         "/api/internal/tasks",
@@ -69,6 +109,27 @@ def create_script_job(client, resource_request):
         },
     )
     return response
+
+
+def create_gpu_script_job(client, memory_bytes):
+    return client.post(
+        "/api/internal/tasks",
+        headers=internal_headers(),
+        json={
+            "type": "script_job",
+            "payload": {
+                "runtime": "pytorch-cuda",
+                "script": "print('gpu')",
+                "resource_request": {
+                    "gpu": {
+                        "required": True,
+                        "count": 1,
+                        "memory_bytes": memory_bytes,
+                    }
+                },
+            },
+        },
+    )
 
 
 def test_register_worker_stores_resource_profiles(monkeypatch, tmp_path):
@@ -305,6 +366,51 @@ def test_overview_worker_capacity_subtracts_running_task_reservations(monkeypatc
     assert worker["capacity_state"]["memory_bytes"] == 44 * GIB
     assert worker["reserved_resources"]["cpu_cores"] == 3
     assert worker["reserved_resources"]["memory_bytes"] == 12 * GIB
+
+
+def test_gpu_reservations_reduce_capacity_and_prevent_overclaim(monkeypatch, tmp_path):
+    client = make_client(monkeypatch, tmp_path)
+    client.post(
+        "/api/internal/workers",
+        headers=internal_headers(),
+        json=gpu_worker_payload(),
+    )
+    first = create_gpu_script_job(client, 24 * GIB)
+    second = create_gpu_script_job(client, 24 * GIB)
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    first_claim = client.post(
+        "/api/worker/claim",
+        headers=worker_headers(),
+        json={"worker_id": "worker-a", "supported_types": ["script_job"]},
+    )
+    second_claim = client.post(
+        "/api/worker/claim",
+        headers=worker_headers(),
+        json={"worker_id": "worker-a", "supported_types": ["script_job"]},
+    )
+
+    assert first_claim.status_code == 200
+    assert first_claim.json()["task"] is not None
+    assert second_claim.status_code == 200
+    assert second_claim.json()["task"] is None
+
+    overview = client.get("/api/admin/overview", auth=("admin", "admin-pass")).json()
+    worker = overview["workers"][0]
+    assert worker["capacity_state"]["gpu_devices"][0]["memory_bytes"] == 16 * GIB
+    assert worker["reserved_resources"]["gpu_count"] == 1
+    assert worker["reserved_resources"]["gpu_memory_bytes"] == 24 * GIB
+
+    queue = client.get(
+        "/api/internal/queue/status",
+        headers=internal_headers(),
+    ).json()
+    resources = queue["resource_totals"]
+    assert resources["scheduler"]["gpu_count"] == 1
+    assert resources["scheduler"]["gpu_memory_bytes"] == 40 * GIB
+    assert resources["available"]["gpu_memory_bytes"] == 16 * GIB
+    assert resources["reserved"]["gpu_memory_bytes"] == 24 * GIB
 
 
 def test_overview_ignores_expired_running_task_reservations(monkeypatch, tmp_path):

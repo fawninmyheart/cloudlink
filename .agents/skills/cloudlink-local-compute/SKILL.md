@@ -152,6 +152,11 @@ If Cloudlink rejects task creation with `resource_request_unsatisfiable`, handle
 GPU jobs must declare both `--runtime pytorch-cuda` and GPU resources such as
 `--gpu-required --gpu-count 1 --gpu-memory-gb 8`. Submit them only when status
 shows an online worker with `runtime_profile.gpu_runtime.verified=true`.
+Use `resource_status.resource_totals.available.gpu_count` and
+`resource_status.resource_totals.available.gpu_memory_bytes` as the current
+cluster-wide scheduling view. These values already account for worker reserve,
+reported free VRAM, and GPU memory reserved by running Cloudlink tasks. Do not
+infer availability from physical VRAM or GPU utilization alone.
 Requirements on `pytorch-cuda` tasks are validation constraints; Cloudlink does
 not install or change packages in the user's micromamba environment. On
 `gpu_runtime_unavailable` or `runtime_dependency_missing`, do not retry by

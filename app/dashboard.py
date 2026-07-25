@@ -1213,6 +1213,32 @@ def dashboard_html() -> str:
       return `<div class="muted">当前上报 ${esc(reserveSummary(reportedReserve))}，待心跳同步</div>`;
     }
 
+    function runningReserveSummary(reserve) {
+      const parts = [];
+      if (reserve?.cpu_cores) parts.push(`CPU ${cores(reserve.cpu_cores)}`);
+      if (reserve?.memory_bytes) parts.push(`内存 ${bytes(reserve.memory_bytes)}`);
+      if (reserve?.gpu_count || reserve?.gpu_memory_bytes) {
+        parts.push(`GPU ${Number(reserve.gpu_count || 0)} 张 · 显存 ${bytes(reserve.gpu_memory_bytes)}`);
+      }
+      return parts.join(" · ");
+    }
+
+    function gpuMonitorSummary(device) {
+      const parts = [];
+      if (device?.utilization_percent !== null && device?.utilization_percent !== undefined) {
+        parts.push(`利用率 ${Number(device.utilization_percent).toFixed(0)}%`);
+      }
+      if (device?.temperature_c !== null && device?.temperature_c !== undefined) {
+        parts.push(`${Number(device.temperature_c).toFixed(0)}°C`);
+      }
+      if (device?.power_draw_watts !== null && device?.power_draw_watts !== undefined) {
+        const limit = device?.power_limit_watts;
+        parts.push(`功耗 ${Number(device.power_draw_watts).toFixed(0)}${limit ? ` / ${Number(limit).toFixed(0)}` : ""} W`);
+      }
+      if (device?.driver_version) parts.push(`驱动 ${device.driver_version}`);
+      return parts.join(" · ");
+    }
+
     function workerDatasetRoots(worker) {
       const configured = Array.isArray(worker.configured_dataset_roots)
         ? worker.configured_dataset_roots
@@ -1312,16 +1338,17 @@ def dashboard_html() -> str:
             <div>数据盘验证 ${state(rootValidationStatus(worker, activeRoot.path), rootValidationLabels)}</div>
           </div>
           <div class="muted">可调度资源与硬盘状态（当前可用 / 上限）</div>
-          ${(runningReserve.cpu_cores || runningReserve.memory_bytes) ? `<div class="muted">运行占用 CPU ${esc(cores(runningReserve.cpu_cores))} · 内存 ${esc(bytes(runningReserve.memory_bytes))}</div>` : ""}
+          ${runningReserveSummary(runningReserve) ? `<div class="muted">运行占用 ${esc(runningReserveSummary(runningReserve))}</div>` : ""}
+          ${(scheduler.gpu_devices || []).map((device) => `<div class="muted">GPU ${esc(device.name || "")}${gpuMonitorSummary(device) ? ` · ${esc(gpuMonitorSummary(device))}` : ""}</div>`).join("")}
           <div class="resource-list">
             ${resourceRow("CPU", scheduler.cpu_cores, capacity.cpu_cores, cores)}
             ${resourceRow("内存", scheduler.memory_bytes, capacity.memory_bytes, bytes)}
             ${resourceRow("任务盘", workerDiskTotal(worker, "job"), workerDiskFree(worker, "job"), bytes)}
             ${resourceRow("数据盘", workerDiskTotal(worker, "dataset"), workerDiskFree(worker, "dataset"), bytes)}
-            ${(scheduler.gpu_devices || []).map((device) => resourceRow(
+            ${(scheduler.gpu_devices || []).map((device, index) => resourceRow(
               `GPU ${device.name || ""}`,
               device.memory_bytes,
-              (capacity.gpu_devices || []).find((item) => item.name === device.name)?.memory_bytes,
+              (capacity.gpu_devices || [])[index]?.memory_bytes,
               bytes,
             )).join("")}
           </div>

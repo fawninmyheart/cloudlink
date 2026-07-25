@@ -410,6 +410,11 @@ activation. GPU jobs use runtime `pytorch-cuda`; their requirement declarations
 are validation-only and Cloudlink never mutates the micromamba environment.
 Small CPU-only dependencies continue to use `python-auto`.
 
+GPU worker heartbeats report device identity, driver version, total and free
+VRAM, utilization, temperature, and power. Scheduling uses GPU count and
+available VRAM after both system reserve and running-task reservations are
+deducted. Utilization, temperature, and power are monitoring signals only.
+
 ## Create An `echo_test` Task
 
 Task creation is internal-only. Run this from the cloud server or trusted server-side code:

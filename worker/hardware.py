@@ -255,7 +255,10 @@ def _detect_nvidia_gpus() -> list[Dict[str, Any]]:
         output = subprocess.check_output(
             [
                 "nvidia-smi",
-                "--query-gpu=name,memory.total,memory.free,driver_version",
+                (
+                    "--query-gpu=name,memory.total,memory.free,driver_version,"
+                    "utilization.gpu,temperature.gpu,power.draw,power.limit"
+                ),
                 "--format=csv,noheader,nounits",
             ],
             text=True,
@@ -269,9 +272,18 @@ def _detect_nvidia_gpus() -> list[Dict[str, Any]]:
         if not line.strip() or "," not in line:
             continue
         parts = [part.strip() for part in line.split(",")]
-        if len(parts) != 4:
+        if len(parts) != 8:
             continue
-        name, memory_mib, free_mib, driver_version = parts
+        (
+            name,
+            memory_mib,
+            free_mib,
+            driver_version,
+            utilization_percent,
+            temperature_c,
+            power_draw_watts,
+            power_limit_watts,
+        ) = parts
         try:
             memory_bytes = int(memory_mib) * 1024**2
         except ValueError:
@@ -286,9 +298,20 @@ def _detect_nvidia_gpus() -> list[Dict[str, Any]]:
                 "memory_total_bytes": memory_bytes,
                 "memory_free_bytes": min(memory_free_bytes, memory_bytes),
                 "driver_version": driver_version,
+                "utilization_percent": _optional_number(utilization_percent),
+                "temperature_c": _optional_number(temperature_c),
+                "power_draw_watts": _optional_number(power_draw_watts),
+                "power_limit_watts": _optional_number(power_limit_watts),
             }
         )
     return devices
+
+
+def _optional_number(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _detect_macos_gpus() -> list[Dict[str, Any]]:

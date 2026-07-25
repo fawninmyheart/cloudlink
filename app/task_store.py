@@ -866,18 +866,24 @@ def aggregate_worker_resources(workers: List[Dict[str, Any]]) -> Dict[str, Any]:
             "memory_bytes": 0,
             "job_disk_bytes": 0,
             "dataset_disk_bytes": 0,
+            "gpu_count": 0,
+            "gpu_memory_bytes": 0,
         },
         "available": {
             "cpu_cores": 0,
             "memory_bytes": 0,
             "job_disk_bytes": 0,
             "dataset_disk_bytes": 0,
+            "gpu_count": 0,
+            "gpu_memory_bytes": 0,
         },
         "reserved": {
             "cpu_cores": 0,
             "memory_bytes": 0,
             "job_disk_bytes": 0,
             "dataset_disk_bytes": 0,
+            "gpu_count": 0,
+            "gpu_memory_bytes": 0,
         },
     }
     for worker in workers:
@@ -886,10 +892,26 @@ def aggregate_worker_resources(workers: List[Dict[str, Any]]) -> Dict[str, Any]:
         scheduler = (worker.get("hardware_profile") or {}).get("scheduler") or {}
         available = worker.get("capacity_state") or {}
         reserved = worker.get("reserved_resources") or {}
-        for key in totals["scheduler"]:
+        for key in ("cpu_cores", "memory_bytes", "job_disk_bytes", "dataset_disk_bytes"):
             totals["scheduler"][key] += int(scheduler.get(key) or 0)
             totals["available"][key] += int(available.get(key) or 0)
             totals["reserved"][key] += int(reserved.get(key) or 0)
+        scheduler_gpus = scheduler.get("gpu_devices") or []
+        available_gpus = available.get("gpu_devices") or []
+        totals["scheduler"]["gpu_count"] += len(scheduler_gpus)
+        totals["scheduler"]["gpu_memory_bytes"] += sum(
+            int(device.get("memory_bytes") or 0) for device in scheduler_gpus
+        )
+        totals["available"]["gpu_count"] += sum(
+            1 for device in available_gpus if int(device.get("memory_bytes") or 0) > 0
+        )
+        totals["available"]["gpu_memory_bytes"] += sum(
+            int(device.get("memory_bytes") or 0) for device in available_gpus
+        )
+        totals["reserved"]["gpu_count"] += int(reserved.get("gpu_count") or 0)
+        totals["reserved"]["gpu_memory_bytes"] += int(
+            reserved.get("gpu_memory_bytes") or 0
+        )
     return totals
 
 
@@ -990,6 +1012,39 @@ def subtract_running_reservations(
         for key in ("cpu_cores", "memory_bytes", "job_disk_bytes", "dataset_disk_bytes"):
             if adjusted.get(key) is not None:
                 adjusted[key] = max(0, adjusted[key] - reservation.get(key, 0))
+        adjusted["gpu_devices"] = _subtract_gpu_reservation(
+            adjusted.get("gpu_devices") or [],
+            reservation.get("gpu") or {},
+        )
+    return adjusted
+
+
+def _subtract_gpu_reservation(
+    devices: List[Dict[str, Any]],
+    gpu_request: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    adjusted = [dict(device) for device in devices]
+    if not gpu_request.get("required"):
+        return adjusted
+    requested_count = max(1, int(gpu_request.get("count") or 1))
+    requested_memory = max(0, int(gpu_request.get("memory_bytes") or 0))
+    candidates = sorted(
+        range(len(adjusted)),
+        key=lambda index: int(adjusted[index].get("memory_bytes") or 0),
+    )
+    selected: List[int] = []
+    for index in candidates:
+        if int(adjusted[index].get("memory_bytes") or 0) >= requested_memory:
+            selected.append(index)
+            if len(selected) >= requested_count:
+                break
+    if len(selected) < requested_count:
+        return adjusted
+    for index in selected:
+        adjusted[index]["memory_bytes"] = max(
+            0,
+            int(adjusted[index].get("memory_bytes") or 0) - requested_memory,
+        )
     return adjusted
 
 
@@ -1018,6 +1073,8 @@ def running_resource_totals(
         "memory_bytes": 0,
         "job_disk_bytes": 0,
         "dataset_disk_bytes": 0,
+        "gpu_count": 0,
+        "gpu_memory_bytes": 0,
     }
     rows = conn.execute(
         """
@@ -1032,8 +1089,13 @@ def running_resource_totals(
     ).fetchall()
     for row in rows:
         reservation = json.loads(row["resource_reservation"])
-        for key in totals:
+        for key in ("cpu_cores", "memory_bytes", "job_disk_bytes", "dataset_disk_bytes"):
             totals[key] += int(reservation.get(key) or 0)
+        gpu = reservation.get("gpu") or {}
+        if gpu.get("required"):
+            count = max(1, int(gpu.get("count") or 1))
+            totals["gpu_count"] += count
+            totals["gpu_memory_bytes"] += count * int(gpu.get("memory_bytes") or 0)
     return totals
 
 
@@ -1050,9 +1112,7 @@ def worker_with_running_resource_summary(
     for key in ("cpu_cores", "memory_bytes", "job_disk_bytes", "dataset_disk_bytes"):
         if capacity.get(key) is not None and scheduler.get(key) is not None:
             capacity[key] = min(int(capacity[key]), int(scheduler[key]))
-    for key, value in reserved.items():
-        if capacity.get(key) is not None:
-            capacity[key] = max(0, int(capacity[key]) - int(value))
+    capacity = subtract_running_reservations(conn, worker["worker_id"], capacity)
     worker["reported_capacity_state"] = worker.get("capacity_state") or {}
     worker["capacity_state"] = capacity
     worker["reserved_resources"] = reserved

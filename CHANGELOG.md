@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026.07.26.2
+
+### GPU Capacity
+
+- Added NVIDIA GPU utilization, temperature, and power metrics to worker
+  heartbeats and worker cards.
+- Added running-task GPU count and VRAM reservations to the schedulable capacity
+  view, preventing rapid concurrent claims from overcommitting VRAM before a
+  task has physically allocated it.
+- Added aggregate GPU count, available VRAM, and reserved VRAM to queue resource
+  status for Codex-side submission decisions.
+- Kept the minimum supported worker version at `2026.07.25.1`; older CPU workers
+  remain compatible, while newly installed GPU workers receive these metrics.
+
 ## 2026.07.26.1
 
 ### Worker Installer

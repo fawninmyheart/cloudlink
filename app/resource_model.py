@@ -180,6 +180,10 @@ def subtract_reserved_profile(
                 "memory_bytes": int(_subtract(total, reserve["gpu_memory_bytes"], "gpu.memory") or 0),
                 "memory_free_bytes": int(device.get("memory_free_bytes") or 0),
                 "driver_version": device.get("driver_version"),
+                "utilization_percent": device.get("utilization_percent"),
+                "temperature_c": device.get("temperature_c"),
+                "power_draw_watts": device.get("power_draw_watts"),
+                "power_limit_watts": device.get("power_limit_watts"),
             }
         )
 

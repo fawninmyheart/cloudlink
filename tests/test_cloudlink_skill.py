@@ -74,6 +74,16 @@ def test_dashboard_worker_card_defines_gpu_runtime_in_its_own_scope():
     assert "${gpuRuntime.enabled ?" in worker_card
 
 
+def test_dashboard_worker_card_shows_gpu_reservations_and_monitoring():
+    text = Path("app/dashboard.py").read_text(encoding="utf-8")
+
+    assert "runningReserveSummary" in text
+    assert "gpuMonitorSummary" in text
+    assert "runningReserve.gpu_memory_bytes" not in text
+    assert "utilization_percent" in text
+    assert "power_draw_watts" in text
+
+
 def test_dashboard_removes_redundant_task_type_labels():
     text = Path("app/dashboard.py").read_text(encoding="utf-8")
 

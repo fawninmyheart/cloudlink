@@ -6,6 +6,7 @@ from worker.hardware import (
     build_runtime_profile,
     collect_worker_profiles,
     detect_available_memory_bytes,
+    detect_gpu_devices,
     detect_total_memory_bytes,
 )
 
@@ -139,6 +140,31 @@ def test_build_runtime_profile_includes_python_and_roots(tmp_path):
     assert profile["python_runtime"].endswith("python")
     assert profile["python_version"]
     assert profile["cloudlink_version"] == CLOUDLINK_VERSION
+
+
+def test_detect_nvidia_gpu_reports_schedulable_and_monitoring_metrics(monkeypatch):
+    monkeypatch.setattr("worker.hardware.sys.platform", "linux")
+    monkeypatch.setattr(
+        "worker.hardware.subprocess.check_output",
+        lambda *_args, **_kwargs: (
+            "NVIDIA GeForce RTX 4090, 49140, 46272, 581.57, 13, 27, 19.5, 450.0\n"
+        ),
+    )
+
+    devices = detect_gpu_devices()
+
+    assert devices == [
+        {
+            "name": "NVIDIA GeForce RTX 4090",
+            "memory_total_bytes": 49140 * 1024**2,
+            "memory_free_bytes": 46272 * 1024**2,
+            "driver_version": "581.57",
+            "utilization_percent": 13.0,
+            "temperature_c": 27.0,
+            "power_draw_watts": 19.5,
+            "power_limit_watts": 450.0,
+        }
+    ]
 
 
 def test_detect_total_memory_uses_sysconf_fallback(monkeypatch):
