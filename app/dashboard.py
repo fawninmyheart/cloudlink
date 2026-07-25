@@ -1218,7 +1218,6 @@ def dashboard_html() -> str:
         ? worker.configured_dataset_roots
         : [];
       const runtime = worker.runtime_profile || {};
-      const gpuRuntime = runtime.gpu_runtime || {};
       if (configured.length) return configured;
       if (Array.isArray(runtime.dataset_roots) && runtime.dataset_roots.length) {
         return runtime.dataset_roots;
@@ -1282,6 +1281,7 @@ def dashboard_html() -> str:
       const concurrency = Number(worker.max_concurrent_tasks || 1);
       const active = Number(worker.active_task_count || 0);
       const runtime = worker.runtime_profile || {};
+      const gpuRuntime = runtime.gpu_runtime || {};
       const roots = workerDatasetRoots(worker);
       const activeRoot = roots.find((root) => root.mode === "active") || roots[0] || {};
       const runningReserve = worker.reserved_resources || {};

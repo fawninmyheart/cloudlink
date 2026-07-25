@@ -63,6 +63,17 @@ def test_dashboard_uses_worker_cards_and_task_modal():
     assert "编辑并发" not in text
 
 
+def test_dashboard_worker_card_defines_gpu_runtime_in_its_own_scope():
+    text = Path("app/dashboard.py").read_text(encoding="utf-8")
+    worker_card = text.split("function workerCard(worker)", 1)[1].split(
+        "function parseTime(value)",
+        1,
+    )[0]
+
+    assert "const gpuRuntime = runtime.gpu_runtime || {};" in worker_card
+    assert "${gpuRuntime.enabled ?" in worker_card
+
+
 def test_dashboard_removes_redundant_task_type_labels():
     text = Path("app/dashboard.py").read_text(encoding="utf-8")
 

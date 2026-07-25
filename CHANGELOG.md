@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026.07.25.2
+
+### Console
+
+- Fixed worker-card rendering failing with `Can't find variable: gpuRuntime`
+  when the production dashboard contains registered workers.
+- Kept the minimum supported worker version at `2026.07.25.1`; this is a
+  server-only console patch and does not require another worker update.
+
 ## 2026.07.25.1
 
 ### Worker Lifecycle And GPU
