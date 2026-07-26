@@ -38,6 +38,7 @@ def test_load_worker_config_applies_defaults_and_normalizes_values():
     assert config.reserve_job_disk_bytes is None
     assert config.reserve_dataset_disk_bytes is None
     assert config.reserve_gpu_memory_bytes is None
+    assert config.gpu_validation_timeout_seconds == 120
 
 
 def test_load_worker_config_parses_concurrency_and_reserve_overrides():

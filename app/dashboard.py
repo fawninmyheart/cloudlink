@@ -1330,7 +1330,9 @@ def dashboard_html() -> str:
           </div>
           ${worker.version_status === "unsupported_platform" ? `<div class="muted">原生 Windows worker 不再支持，请在 WSL 中选择 Linux 重新部署。</div>` : ""}
           ${worker.needs_update && worker.version_status !== "unsupported_platform" ? `<div class="muted">worker ${esc(worker.worker_version || "未知版本")}，最低要求 ${esc(worker.minimum_worker_version || worker.required_version || "-")}</div>` : ""}
-          ${gpuRuntime.enabled ? `<div class="muted">GPU ${gpuRuntime.verified ? "已验证" : `不可用：${esc(gpuRuntime.error || "环境验证失败")}`}</div>` : ""}
+          ${gpuRuntime.enabled ? `<div class="muted">GPU ${gpuRuntime.verified
+            ? (gpuRuntime.validation_warning ? "已验证（最近复检超时，沿用上次正常状态）" : "已验证")
+            : `不可用：${esc(gpuRuntime.error || "环境验证失败")}`}</div>` : ""}
           ${reserveSyncLine(worker)}
           <div class="worker-paths">
             <div>任务盘 <span class="mono">${esc(runtime.job_root || "-")}</span></div>

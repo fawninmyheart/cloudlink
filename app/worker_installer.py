@@ -89,6 +89,7 @@ def worker_env_text(
             f"CLOUDLINK_GPU_ENABLED={1 if gpu_enabled else 0}",
             f"CLOUDLINK_GPU_ENVIRONMENT_PATH={gpu_environment_path}",
             f"CLOUDLINK_MICROMAMBA_EXE={micromamba_executable}",
+            "CLOUDLINK_GPU_VALIDATION_TIMEOUT_SECONDS=120",
             "CLOUDLINK_ARTIFACT_CHUNK_BYTES=4194304",
             "CLOUDLINK_ARTIFACT_UPLOAD_RETRIES=6",
             "CLOUDLINK_ARTIFACT_RETRY_BASE_SECONDS=2",

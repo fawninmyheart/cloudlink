@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026.07.26.5
+
+### GPU Runtime Validation
+
+- Increased the GPU environment validation timeout from 30 to 120 seconds for
+  large PyTorch and Transformers environments.
+- A periodic validation timeout now preserves the most recent verified GPU
+  runtime instead of immediately disabling GPU scheduling.
+- GPU validation timeout messages no longer expose the full probe command in
+  the console.
+- Raised the GPU-specific minimum worker version to `2026.07.26.5`; CPU-only
+  workers remain compatible with `2026.07.25.1`.
+
 ## 2026.07.26.4
 
 ### Capability Version Gates

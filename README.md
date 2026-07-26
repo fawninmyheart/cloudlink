@@ -414,6 +414,10 @@ GPU worker heartbeats report device identity, driver version, total and free
 VRAM, utilization, temperature, and power. Scheduling uses GPU count and
 available VRAM after both system reserve and running-task reservations are
 deducted. Utilization, temperature, and power are monitoring signals only.
+The worker periodically revalidates the configured environment with a default
+timeout of 120 seconds. `CLOUDLINK_GPU_VALIDATION_TIMEOUT_SECONDS` can override
+that limit. A timeout keeps the most recent verified runtime and reports a
+warning; a definitive CUDA or dependency failure still disables GPU scheduling.
 GPU workers can have a higher capability-specific minimum version than CPU-only
 workers, so GPU telemetry changes do not force unrelated CPU nodes to update.
 

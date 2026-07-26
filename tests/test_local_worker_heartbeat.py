@@ -4,6 +4,7 @@ from pathlib import Path
 
 import worker.local_worker as local_worker_module
 from worker.config import WorkerConfig
+from worker.gpu_runtime import GpuRuntimeValidationTimeout
 from worker.local_worker import CloudWorker
 from worker.script_runner import ScriptExecutionTimeout
 
@@ -97,6 +98,55 @@ def test_worker_claim_sends_capacity_state(monkeypatch):
     assert captured["path"] == "/api/worker/claim"
     assert captured["body"]["capacity_state"] == {"cpu_cores": 4, "memory_bytes": 12}
     assert captured["body"]["active_task_count"] == 0
+
+
+def test_periodic_gpu_validation_timeout_retains_verified_profile(monkeypatch):
+    configure_worker_env(monkeypatch)
+    monkeypatch.setenv("CLOUDLINK_GPU_ENABLED", "1")
+    monkeypatch.setenv("CLOUDLINK_GPU_ENVIRONMENT_PATH", "/opt/gpu-env")
+    monkeypatch.setenv("CLOUDLINK_MICROMAMBA_EXE", "/opt/micromamba")
+    verified = {
+        "enabled": True,
+        "verified": True,
+        "runtime": "pytorch-cuda",
+        "torch_version": "2.12.1",
+    }
+    calls = iter(
+        [
+            verified,
+            GpuRuntimeValidationTimeout(
+                "GPU environment validation timed out after 120 seconds"
+            ),
+        ]
+    )
+
+    def validate(*_args, **_kwargs):
+        result = next(calls)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(local_worker_module, "validate_gpu_runtime", validate)
+    monkeypatch.setattr(
+        local_worker_module,
+        "collect_worker_profiles",
+        lambda **kwargs: (
+            {"scheduler": {"gpu_devices": []}},
+            {"gpu_runtime": kwargs["gpu_runtime_profile"]},
+            {"gpu_devices": []},
+        ),
+    )
+
+    worker = CloudWorker()
+    worker.last_gpu_validation_at = 0
+    worker.refresh_worker_profiles()
+
+    assert worker.gpu_runtime_profile["verified"] is True
+    assert worker.gpu_runtime_profile["validation_stale"] is True
+    assert "timed out after 120 seconds" in (
+        worker.gpu_runtime_profile["validation_warning"]
+    )
+    assert worker.runtime_profile["gpu_runtime"]["torch_version"] == "2.12.1"
 
 
 def test_worker_heartbeat_adopts_server_concurrency(monkeypatch):

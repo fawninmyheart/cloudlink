@@ -12,6 +12,10 @@ class GpuRuntimeError(RuntimeError):
     error_code = "gpu_runtime_unavailable"
 
 
+class GpuRuntimeValidationTimeout(GpuRuntimeError):
+    error_code = "gpu_runtime_validation_timeout"
+
+
 class RuntimeDependencyError(GpuRuntimeError):
     error_code = "runtime_dependency_missing"
 
@@ -65,7 +69,7 @@ def micromamba_python_command(
 def validate_gpu_runtime(
     env: Optional[Mapping[str, str]] = None,
     *,
-    timeout: int = 30,
+    timeout: float = 120,
 ) -> Dict[str, Any]:
     if not gpu_runtime_enabled(env):
         return {"enabled": False, "verified": False}
@@ -97,13 +101,18 @@ except Exception as exc:
     result["transformers_error"] = f"{type(exc).__name__}: {exc}"
 print(json.dumps(result))
 """
-    completed = subprocess.run(
-        micromamba_python_command("-c", probe, env=env),
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            micromamba_python_command("-c", probe, env=env),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GpuRuntimeValidationTimeout(
+            f"GPU environment validation timed out after {timeout:g} seconds"
+        ) from exc
     if completed.returncode != 0:
         raise GpuRuntimeError(
             f"GPU environment probe failed: {completed.stderr.strip()[-500:]}"

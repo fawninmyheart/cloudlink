@@ -35,6 +35,7 @@ class WorkerConfig:
     gpu_enabled: bool = False
     gpu_environment_path: Optional[str] = None
     micromamba_executable: Optional[str] = None
+    gpu_validation_timeout_seconds: float = 120
 
 
 def csv_list(value: str) -> List[str]:
@@ -191,4 +192,9 @@ def load_worker_config(env: Optional[Mapping[str, str]] = None) -> WorkerConfig:
         gpu_enabled=_bool(source, "CLOUDLINK_GPU_ENABLED"),
         gpu_environment_path=_env(source, "CLOUDLINK_GPU_ENVIRONMENT_PATH") or None,
         micromamba_executable=_env(source, "CLOUDLINK_MICROMAMBA_EXE") or None,
+        gpu_validation_timeout_seconds=_positive_float(
+            source,
+            "CLOUDLINK_GPU_VALIDATION_TIMEOUT_SECONDS",
+            "120",
+        ),
     )

@@ -15,7 +15,7 @@ try:
     from worker.artifact_manager import ResultArtifactUploader
     from worker.config import WorkerConfig, WorkerConfigError, load_worker_config
     from worker.dataset_manager import DatasetManager
-    from worker.gpu_runtime import validate_gpu_runtime
+    from worker.gpu_runtime import GpuRuntimeValidationTimeout, validate_gpu_runtime
     from worker.hardware import collect_worker_profiles
     from worker.script_runner import ScriptExecutionTimeout, run_script_job
 except ModuleNotFoundError:  # pragma: no cover - supports direct script execution.
@@ -23,7 +23,7 @@ except ModuleNotFoundError:  # pragma: no cover - supports direct script executi
     from artifact_manager import ResultArtifactUploader
     from config import WorkerConfig, WorkerConfigError, load_worker_config
     from dataset_manager import DatasetManager
-    from gpu_runtime import validate_gpu_runtime
+    from gpu_runtime import GpuRuntimeValidationTimeout, validate_gpu_runtime
     from hardware import collect_worker_profiles
     from script_runner import ScriptExecutionTimeout, run_script_job
 
@@ -87,12 +87,32 @@ class CloudWorker:
             "CLOUDLINK_MICROMAMBA_EXE": self.config.micromamba_executable or "",
         }
 
-    def validate_gpu_runtime_best_effort(self) -> Dict[str, Any]:
+    def validate_gpu_runtime_best_effort(
+        self,
+        previous_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         self.last_gpu_validation_at = time.time()
         if not self.config.gpu_enabled:
             return {"enabled": False, "verified": False}
         try:
-            return validate_gpu_runtime(self.gpu_runtime_env())
+            return validate_gpu_runtime(
+                self.gpu_runtime_env(),
+                timeout=self.config.gpu_validation_timeout_seconds,
+            )
+        except GpuRuntimeValidationTimeout as exc:
+            if previous_profile and previous_profile.get("verified"):
+                retained = dict(previous_profile)
+                retained["validation_warning"] = str(exc)
+                retained["validation_stale"] = True
+                return retained
+            return {
+                "enabled": True,
+                "verified": False,
+                "error": str(exc),
+                "error_code": exc.error_code,
+                "environment_path": self.config.gpu_environment_path,
+                "micromamba_executable": self.config.micromamba_executable,
+            }
         except Exception as exc:
             return {
                 "enabled": True,
@@ -159,7 +179,9 @@ class CloudWorker:
             self.config.gpu_enabled
             and time.time() - self.last_gpu_validation_at >= 600
         ):
-            self.gpu_runtime_profile = self.validate_gpu_runtime_best_effort()
+            self.gpu_runtime_profile = self.validate_gpu_runtime_best_effort(
+                self.gpu_runtime_profile
+            )
         (
             self.hardware_profile,
             self.runtime_profile,
