@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     submitter_id TEXT,
     group_id TEXT,
     error_code TEXT,
+    cancel_requested_at TEXT,
+    cancel_reason TEXT,
     retry_count INTEGER NOT NULL DEFAULT 0
 );
 
@@ -313,6 +315,8 @@ def init_db() -> None:
         ensure_column(conn, "tasks", "submitter_id", "submitter_id TEXT")
         ensure_column(conn, "tasks", "group_id", "group_id TEXT")
         ensure_column(conn, "tasks", "error_code", "error_code TEXT")
+        ensure_column(conn, "tasks", "cancel_requested_at", "cancel_requested_at TEXT")
+        ensure_column(conn, "tasks", "cancel_reason", "cancel_reason TEXT")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_tasks_submitter

@@ -36,6 +36,7 @@ class WorkerConfig:
     gpu_environment_path: Optional[str] = None
     micromamba_executable: Optional[str] = None
     gpu_validation_timeout_seconds: float = 120
+    task_lease_renew_seconds: float = 5
 
 
 def csv_list(value: str) -> List[str]:
@@ -196,5 +197,10 @@ def load_worker_config(env: Optional[Mapping[str, str]] = None) -> WorkerConfig:
             source,
             "CLOUDLINK_GPU_VALIDATION_TIMEOUT_SECONDS",
             "120",
+        ),
+        task_lease_renew_seconds=_positive_float(
+            source,
+            "CLOUDLINK_TASK_LEASE_RENEW_SECONDS",
+            "5",
         ),
     )

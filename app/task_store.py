@@ -498,7 +498,8 @@ def list_task_summaries(
         SELECT
             id, type, status,
             created_at, updated_at, started_at, finished_at,
-            locked_by, retry_count, submitter_id, group_id, error_code
+            locked_by, retry_count, submitter_id, group_id, error_code,
+            cancel_requested_at, cancel_reason
         FROM tasks
         {where}
         ORDER BY created_at DESC
@@ -792,13 +793,13 @@ def touch_worker(
     return get_worker(conn, worker_id)
 
 
-def expire_locked_tasks(conn: sqlite3.Connection, now: str, max_retries: int) -> None:
+def expire_locked_tasks(conn: sqlite3.Connection, now: str) -> None:
     conn.execute(
         """
         UPDATE tasks
         SET status = 'timeout',
-            error_code = 'lease_timeout',
-            error = 'Task lock expired after max retries',
+            error_code = 'worker_lost',
+            error = 'Worker lease expired; task was not automatically retried',
             updated_at = ?,
             finished_at = ?,
             locked_until = NULL,
@@ -806,9 +807,8 @@ def expire_locked_tasks(conn: sqlite3.Connection, now: str, max_retries: int) ->
         WHERE status = 'running'
           AND locked_until IS NOT NULL
           AND locked_until <= ?
-          AND retry_count >= ?
         """,
-        (now, now, now, max_retries),
+        (now, now, now),
     )
 
 
@@ -839,6 +839,7 @@ def queue_status(conn: sqlite3.Connection) -> Dict[str, Any]:
     settings = get_settings()
     now = utc_now()
     expire_pending_tasks(conn, now, settings.queue_timeout_seconds)
+    expire_locked_tasks(conn, now)
     expire_unavailable_dataset_tasks(conn, settings)
     counts = task_summary(conn)
     oldest = conn.execute(
@@ -1324,7 +1325,7 @@ def claim_task(
 
         expire_pending_tasks(conn, now, settings.queue_timeout_seconds)
         expire_unavailable_dataset_tasks(conn, settings)
-        expire_locked_tasks(conn, now, settings.task_max_retries)
+        expire_locked_tasks(conn, now)
         registered_supported = set(worker["supported_types"])
         allowed_supported = sorted(
             set(supported_types) & registered_supported & settings.allowed_task_types
@@ -1361,18 +1362,10 @@ def claim_task(
             f"""
             SELECT * FROM tasks
             WHERE type IN ({placeholders})
-              AND (
-                status = 'pending'
-                OR (
-                    status = 'running'
-                    AND locked_until IS NOT NULL
-                    AND locked_until <= ?
-                    AND retry_count < ?
-                )
-              )
+              AND status = 'pending'
             ORDER BY created_at ASC
             """,
-            [*allowed_supported, now, settings.task_max_retries],
+            allowed_supported,
         ).fetchall()
 
         row = None
@@ -1434,12 +1427,10 @@ def claim_task(
             conn.execute("COMMIT")
             return None
 
-        claimed_payload = json.loads(row["payload"])
-        lease_seconds = lease_seconds_for_payload(claimed_payload, settings)
+        lease_seconds = settings.task_lock_seconds
         locked_until = (
             datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
         ).isoformat()
-        retry_increment = 1 if row["status"] == "running" else 0
         started_at = row["started_at"] or now
         lease_id = str(uuid.uuid4())
         conn.execute(
@@ -1453,7 +1444,8 @@ def claim_task(
                 locked_until = ?,
                 lease_id = ?,
                 resource_reservation = ?,
-                retry_count = retry_count + ?
+                cancel_requested_at = NULL,
+                cancel_reason = NULL
             WHERE id = ?
             """,
             (
@@ -1463,7 +1455,6 @@ def claim_task(
                 locked_until,
                 lease_id,
                 json.dumps(resource_request, ensure_ascii=False),
-                retry_increment,
                 row["id"],
             ),
         )
@@ -1485,18 +1476,33 @@ def pending_age_seconds(task: Dict[str, Any], now: str) -> int:
     return max(0, int((parse_utc(now) - parse_utc(task["created_at"])).total_seconds()))
 
 
-def lease_seconds_for_payload(payload: Dict[str, Any], settings: Settings) -> int:
-    timeout_seconds = script_timeout_seconds(payload)
-    if timeout_seconds <= 0:
-        return settings.task_lock_seconds
-    return max(settings.task_lock_seconds, timeout_seconds + 300)
-
-
-def script_timeout_seconds(payload: Dict[str, Any]) -> int:
-    try:
-        return int(payload.get("timeout_seconds") or 0)
-    except (TypeError, ValueError):
-        return 0
+def renew_task_lease(
+    conn: sqlite3.Connection,
+    task_id: str,
+    worker_id: str,
+    lease_id: str,
+) -> Dict[str, Any]:
+    now = utc_now()
+    expire_locked_tasks(conn, now)
+    task = _assert_owned_running_task(conn, task_id, worker_id, lease_id)
+    locked_until = (
+        parse_utc(now) + timedelta(seconds=get_settings().task_lock_seconds)
+    ).isoformat()
+    conn.execute(
+        """
+        UPDATE tasks
+        SET locked_until = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (locked_until, now, task_id),
+    )
+    return {
+        "status": "ok",
+        "locked_until": locked_until,
+        "cancel_requested": bool(task.get("cancel_requested_at")),
+        "cancel_reason": task.get("cancel_reason") or "",
+    }
 
 
 def set_task_artifact_expiry(
@@ -1576,9 +1582,19 @@ def cancel_task(
     if task["status"] in TERMINAL_STATUSES:
         return task
     if task["status"] == "running":
-        locked_until = task.get("locked_until")
-        if locked_until and parse_utc(locked_until) > parse_utc(now):
-            raise TaskConflict("Task is actively running and cannot be cancelled")
+        message = reason.strip() if reason.strip() else "Task cancelled by submitter"
+        validate_text_size(message, settings)
+        conn.execute(
+            """
+            UPDATE tasks
+            SET cancel_requested_at = COALESCE(cancel_requested_at, ?),
+                cancel_reason = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now, message, now, task_id),
+        )
+        return get_task(conn, task_id)
     elif task["status"] != "pending":
         raise TaskConflict("Task cannot be cancelled")
     message = reason.strip() if reason.strip() else "Task cancelled by submitter"
@@ -1612,9 +1628,31 @@ def report_success(
     settings = get_settings()
     validate_json_size(result, settings)
     validate_text_size(logs, settings)
-    _assert_owned_running_task(conn, task_id, worker_id, lease_id)
+    task = _assert_owned_running_task(conn, task_id, worker_id, lease_id)
 
     now = utc_now()
+    if task.get("cancel_requested_at"):
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'cancelled',
+                error = ?,
+                error_code = 'cancelled',
+                updated_at = ?,
+                finished_at = ?,
+                locked_until = NULL,
+                lease_id = NULL
+            WHERE id = ?
+            """,
+            (
+                task.get("cancel_reason") or "Task cancelled by submitter",
+                now,
+                now,
+                task_id,
+            ),
+        )
+        set_task_artifact_expiry(conn, task_id, now)
+        return get_task(conn, task_id)
     conn.execute(
         """
         UPDATE tasks
@@ -1647,11 +1685,20 @@ def report_failed(
     settings = get_settings()
     validate_text_size(error, settings)
     validate_text_size(logs, settings)
-    _assert_owned_running_task(conn, task_id, worker_id, lease_id)
+    task = _assert_owned_running_task(conn, task_id, worker_id, lease_id)
 
     now = utc_now()
     normalized_error_code = str(error_code or "").strip() or None
-    status = "timeout" if normalized_error_code == "execution_timeout" else "failed"
+    if task.get("cancel_requested_at"):
+        status = "cancelled"
+        normalized_error_code = "cancelled"
+        error = task.get("cancel_reason") or "Task cancelled by submitter"
+    elif normalized_error_code == "execution_timeout":
+        status = "timeout"
+    elif normalized_error_code == "cancelled":
+        status = "cancelled"
+    else:
+        status = "failed"
     conn.execute(
         """
         UPDATE tasks

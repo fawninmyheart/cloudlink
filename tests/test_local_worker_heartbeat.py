@@ -481,7 +481,7 @@ def test_worker_reports_execution_timeout_with_error_code(monkeypatch):
     worker = CloudWorker()
     reported = {}
 
-    def fake_run_task(_task):
+    def fake_run_task(_task, _cancel_event):
         raise ScriptExecutionTimeout("script exceeded timeout", timeout_seconds=1)
 
     def fake_report_failed(task_id, lease_id, error, logs, error_code=None):
@@ -510,6 +510,35 @@ def test_worker_reports_execution_timeout_with_error_code(monkeypatch):
     assert reported["task_id"] == "task-timeout"
     assert reported["lease_id"] == "lease-timeout"
     assert reported["error_code"] == "execution_timeout"
+
+
+def test_task_lease_loop_delivers_cancel_request(monkeypatch):
+    configure_worker_env(monkeypatch)
+    monkeypatch.setenv("CLOUDLINK_TASK_LEASE_RENEW_SECONDS", "0.01")
+    worker = CloudWorker()
+    cancel_event = threading.Event()
+    stop_event = threading.Event()
+    calls = []
+
+    def fake_post_json(path, body):
+        calls.append((path, body))
+        return {"cancel_requested": True, "cancel_reason": "stop model run"}
+
+    monkeypatch.setattr(worker, "post_json", fake_post_json)
+    thread = threading.Thread(
+        target=worker.task_lease_loop,
+        args=("task-a", "lease-a", cancel_event, stop_event),
+    )
+    thread.start()
+
+    assert cancel_event.wait(timeout=1)
+    stop_event.set()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert calls[0] == (
+        "/api/worker/tasks/task-a/lease",
+        {"worker_id": "worker-a", "lease_id": "lease-a"},
+    )
 
 
 def test_doctor_uses_safe_claim_probe_and_hides_secret(monkeypatch, capsys):

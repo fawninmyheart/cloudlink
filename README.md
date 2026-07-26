@@ -130,11 +130,11 @@ CLOUDLINK_CODEX_TOKEN=$CLOUDLINK_CODEX_TOKEN
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=$ADMIN_PASSWORD
 TASK_LOCK_SECONDS=1800
-TASK_MAX_RETRIES=1
 CLOUDLINK_MAX_PENDING_TASKS=10
 CLOUDLINK_QUEUE_TIMEOUT_SECONDS=21600
 CLOUDLINK_STARVATION_PROTECTION_SECONDS=900
-CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.25.1
+CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.27.1
+CLOUDLINK_MINIMUM_GPU_WORKER_VERSION=2026.07.27.1
 WORKER_ONLINE_SECONDS=180
 TASK_ALLOWED_TYPES=echo_test,generate_daily_report,script_job
 WORKER_INSTALL_INVITE_TTL_MINUTES=30
@@ -246,8 +246,8 @@ export CLOUDLINK_CODEX_TOKEN="$(python3 -c 'import secrets; print(secrets.token_
 export ADMIN_USERNAME=admin
 export ADMIN_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
 export TASK_LOCK_SECONDS=1800
-export TASK_MAX_RETRIES=1
-export CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.25.1
+export CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.27.1
+export CLOUDLINK_MINIMUM_GPU_WORKER_VERSION=2026.07.27.1
 export WORKER_ONLINE_SECONDS=180
 export TASK_ALLOWED_TYPES=echo_test,generate_daily_report,script_job
 export CLOUDLINK_DATA_ROOT=./data
@@ -314,7 +314,9 @@ Cloudlink protects local workers from unbounded task buildup:
 - `CLOUDLINK_MAX_PENDING_TASKS` limits the number of pending tasks. The default is `10`.
 - `CLOUDLINK_QUEUE_TIMEOUT_SECONDS` expires tasks that wait too long before being claimed. The default is `21600` seconds.
 - `CLOUDLINK_STARVATION_PROTECTION_SECONDS` helps older large tasks avoid being starved by a constant stream of smaller tasks.
-- Script jobs use `--timeout` for execution time after a worker starts the Python script. This is separate from queue wait time.
+- Script jobs use `--timeout` for execution time after a worker starts the Python script. This is separate from queue wait time. Explicit timeouts may be as long as one year by default; oversized values are rejected rather than silently shortened.
+- Running workers renew task leases every five seconds. A lost lease ends as `worker_lost` and is never automatically reclaimed as another attempt.
+- Cancelling a running task requests worker-side process-tree termination. Resources remain reserved until the worker confirms `cancelled`.
 - Workers whose `cloudlink_version` is below `CLOUDLINK_MINIMUM_WORKER_VERSION` are marked as needing an update and cannot claim new tasks.
 
 Cloud-side Codex CLI should inspect queue facts before batch submission:
@@ -548,6 +550,12 @@ scripts/submit_local_script_job.py \
   --wait
 ```
 
+`--timeout` accepts long-running model jobs up to the worker's configured
+maximum, which defaults to one year. With `--wait`, the command waits for the
+task timeout plus five minutes unless `--wait-timeout-seconds` is set
+explicitly. For multi-day jobs, omitting `--wait` and polling the task is often
+more practical.
+
 The worker exposes the local path to the script:
 
 ```python
@@ -682,7 +690,7 @@ sudo systemctl restart cloudlink
 - If no task is claimed, remember that the worker now tries task claim first and only checks dataset delete requests on `WORKER_MAINTENANCE_INTERVAL_SECONDS`, so a dataset-maintenance timeout should no longer block every idle poll.
 - If a legacy start script fails while fetching `WORKER_SECRET` over SSH, rerun once when SSH is reachable. The start script caches the secret at `CLOUDLINK_WORKER_SECRET_FILE`, and later starts use the local cache instead of SSH. Dashboard-installed workers do not need SSH access to fetch the worker credential.
 - Query the task and check whether `status` is `pending`, `running`, or `timeout`.
-- If a worker crashed while running a task, wait for `TASK_LOCK_SECONDS`; the next worker claim can pick up the expired running task until `TASK_MAX_RETRIES` is reached.
+- If a worker crashes while running a task, its lease expires after `TASK_LOCK_SECONDS` and the task ends once as `worker_lost`. Cloudlink never automatically reclaims it; inspect the failure before submitting a new task.
 - Check worker logs for network/API errors.
 
 ## Add A New Task Type

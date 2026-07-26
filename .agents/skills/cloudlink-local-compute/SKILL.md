@@ -136,7 +136,12 @@ Queue rules for Codex CLI:
 - If `pending_count >= max_pending`, do not submit more tasks. Poll your own tasks, cancel obsolete pending tasks, or wait before retrying.
 - If `oldest_pending_age_seconds` approaches `queue_timeout_seconds`, do not add unrelated small tasks that can starve older large tasks.
 - If a task returns `error_code=queue_timeout`, treat it as never executed; reduce queue pressure, lower parallelism, or split differently before resubmitting.
-- If a task returns `error_code=execution_timeout`, treat it as executed too long; reduce runtime scope, improve the script, or raise `--timeout` only when resources and workflow justify it.
+- If a task returns `error_code=execution_timeout`, the worker has terminated the
+  task process tree. Reduce runtime scope, improve the script, or raise
+  `--timeout` when a long model run genuinely needs more time.
+- If a task returns `error_code=worker_lost`, its renewable worker lease expired.
+  Cloudlink does not automatically execute the task again; inspect the worker
+  before explicitly submitting a new task.
 - Cloudlink enforces `max_pending` globally. Codex CLI must not loop on rejected submissions.
 
 For resource-heavy work, inspect scheduler-visible resources before designing the script. Use `hardware_profile.scheduler` and `capacity_state`; do not design against raw physical capacity because Cloudlink subtracts CPU, memory, disk, and GPU reserve for the local operating system before exposing capacity.
@@ -145,7 +150,7 @@ Cloud-side Codex CLI must estimate CPU cores, peak memory, temporary job disk, d
 
 并发提交规则：当分析可以拆成相互独立的年份、品种、参数段、文件分片或候选集合时，应优先一次性提交多个 Cloudlink 任务，并在所有任务完成后汇总结果；不要一个一个任务提交、等待、再提交，除非后一个任务确实依赖前一个任务的输出。提交前仍要检查当前在线 worker 的可调度资源与并发上限，并让每个任务声明自己的 `resource_request`。
 
-Ownership rule: Codex CLI internal queries only return tasks submitted by the same Codex submitter token, plus total resource occupancy and free-capacity facts. 只返回自己提交的任务；do not assume missing task ids belong to the current session. Use `GET /api/internal/tasks` to list your own tasks, and `POST /api/internal/tasks/<task_id>/cancel` only for your own obsolete pending tasks.
+Ownership rule: Codex CLI internal queries only return tasks submitted by the same Codex submitter token, plus total resource occupancy and free-capacity facts. 只返回自己提交的任务；do not assume missing task ids belong to the current session. Use `GET /api/internal/tasks` to list your own tasks. `POST /api/internal/tasks/<task_id>/cancel` can cancel your own pending or running task. A running task first remains `running` with `cancel_requested_at`; poll until the worker confirms terminal `cancelled`.
 
 If Cloudlink rejects task creation with `resource_request_unsatisfiable`, handle it automatically. Reduce scope, split the workload, stream or batch input data, lower concurrency, or request less memory/disk and resubmit. Do not ask the user just because the scheduler rejected an oversized first attempt. Only report back after repeated automatic reductions still cannot produce a valid task.
 
@@ -207,6 +212,14 @@ Resource-aware tasks should include `payload.resource_request`:
 ```
 
 Use scheduler-visible units, not physical machine totals. If unsure, choose a conservative estimate and split the job into smaller independent tasks.
+
+`--timeout` is the maximum real script runtime after launch. Long model jobs may
+request multi-hour or multi-day timeouts; the default worker maximum is one year
+(`31536000` seconds). Requests above the configured maximum fail explicitly and
+are never silently shortened. For multi-day jobs, submit without `--wait` and
+poll the task API, or set `--wait-timeout-seconds` longer than the task timeout.
+Cloudlink renews the worker lease independently while the script runs, so the
+lease does not need to be derived from the requested timeout.
 
 For important outputs:
 

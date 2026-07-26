@@ -77,6 +77,7 @@ from app.task_store import (
     list_workers,
     queue_status,
     register_worker,
+    renew_task_lease,
     report_failed,
     report_success,
     task_summary,
@@ -194,6 +195,11 @@ class FailedRequest(BaseModel):
     error: str
     logs: Optional[str] = None
     error_code: Optional[str] = None
+
+
+class TaskLeaseRequest(BaseModel):
+    worker_id: str = Field(min_length=1)
+    lease_id: str = Field(min_length=1)
 
 
 class RegisterWorkerRequest(BaseModel):
@@ -1615,6 +1621,28 @@ def api_worker_complete_artifact_upload(
             artifact["lease_id"],
         )
         return complete_artifact_upload(conn, artifact_id)
+    except Exception as exc:
+        raise map_store_error(exc) from exc
+
+
+@app.post(
+    "/api/worker/tasks/{task_id}/lease",
+    dependencies=[Depends(require_worker_auth)],
+)
+def api_renew_task_lease(
+    task_id: str,
+    body: TaskLeaseRequest,
+    worker_token: str = Depends(require_worker_auth),
+    conn: Connection = Depends(get_connection),
+) -> Dict[str, Any]:
+    try:
+        get_worker_for_api(conn, body.worker_id, worker_token)
+        return renew_task_lease(
+            conn,
+            task_id,
+            body.worker_id,
+            body.lease_id,
+        )
     except Exception as exc:
         raise map_store_error(exc) from exc
 

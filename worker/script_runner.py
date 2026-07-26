@@ -2,7 +2,10 @@ import base64
 import json
 import os
 import re
+import signal
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -31,20 +34,26 @@ class ScriptExecutionTimeout(RuntimeError):
         super().__init__(message)
 
 
+class ScriptExecutionCancelled(RuntimeError):
+    error_code = "cancelled"
+
+
 def run_script_job(
     payload: Dict[str, Any],
     worker_id: str,
     task_id: Optional[str] = None,
+    lease_id: Optional[str] = None,
     dataset_env: Optional[Dict[str, str]] = None,
     dataset_records: Optional[List[Dict[str, Any]]] = None,
     artifact_uploader: Any = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> Tuple[Dict[str, Any], str]:
     runtime = normalize_runtime(payload.get("runtime", "python-auto"))
     script = payload.get("script")
     if not isinstance(script, str) or not script.strip():
         raise ValueError("script_job payload.script is required")
 
-    job_dir = build_job_dir(task_id)
+    job_dir = build_job_dir(task_id, lease_id)
     output_dir = job_dir / "outputs"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -66,25 +75,14 @@ def run_script_job(
     args = normalize_string_list(payload.get("args", []), "args")
     timeout_seconds = bounded_timeout(payload.get("timeout_seconds"))
     command = command_prefix + [str(entrypoint_path)] + args
-    try:
-        completed = subprocess.run(
-            command,
-            input=normalize_stdin(payload.get("stdin", "")),
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-            cwd=str(job_dir),
-            env=build_job_env(job_dir, output_dir, payload.get("env", {}), dataset_env or {}),
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout = timeout_output_text(exc.stdout)
-        stderr = timeout_output_text(exc.stderr)
-        logs = build_logs(command, -1, stdout, stderr)
-        raise ScriptExecutionTimeout(
-            f"script_job execution exceeded timeout_seconds={timeout_seconds}",
-            timeout_seconds=timeout_seconds,
-        ) from exc
+    completed = run_process(
+        command,
+        stdin_text=normalize_stdin(payload.get("stdin", "")),
+        timeout_seconds=timeout_seconds,
+        cwd=job_dir,
+        env=build_job_env(job_dir, output_dir, payload.get("env", {}), dataset_env or {}),
+        cancel_event=cancel_event,
+    )
 
     stdout = trim_text(completed.stdout)
     stderr = trim_text(completed.stderr)
@@ -124,12 +122,25 @@ def normalize_runtime(value: Any) -> str:
     )
 
 
-def build_job_dir(task_id: Optional[str]) -> Path:
+def build_job_dir(task_id: Optional[str], lease_id: Optional[str] = None) -> Path:
     job_root = Path(
         os.getenv("CLOUDLINK_JOB_ROOT", str(Path.home() / ".cloudlink" / "jobs"))
     ).expanduser()
-    job_id = task_id if task_id and re.match(r"^[A-Za-z0-9_.-]+$", task_id) else str(uuid4())
-    job_dir = (job_root / job_id).resolve()
+    job_id = (
+        task_id
+        if task_id and re.match(r"^[A-Za-z0-9_.-]+$", task_id)
+        else str(uuid4())
+    )
+    attempt_id = (
+        lease_id
+        if lease_id and re.match(r"^[A-Za-z0-9_.-]+$", lease_id)
+        else None
+    )
+    job_dir = (
+        (job_root / job_id / attempt_id).resolve()
+        if attempt_id
+        else (job_root / job_id).resolve()
+    )
     job_dir.mkdir(parents=True, exist_ok=True)
     return job_dir
 
@@ -214,7 +225,7 @@ def normalize_stdin(value: Any) -> str:
 
 
 def bounded_timeout(value: Any) -> int:
-    max_timeout = int(os.getenv("CLOUDLINK_SCRIPT_MAX_TIMEOUT_SECONDS", "3600"))
+    max_timeout = int(os.getenv("CLOUDLINK_SCRIPT_MAX_TIMEOUT_SECONDS", "31536000"))
     default_timeout = min(1800, max_timeout)
     if value is None:
         return default_timeout
@@ -224,15 +235,83 @@ def bounded_timeout(value: Any) -> int:
         raise ValueError("timeout_seconds must be an integer") from exc
     if requested <= 0:
         raise ValueError("timeout_seconds must be positive")
-    return min(requested, max_timeout)
+    if requested > max_timeout:
+        raise ValueError(
+            f"timeout_seconds exceeds worker maximum of {max_timeout} seconds"
+        )
+    return requested
 
 
-def timeout_output_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return str(value)
+def run_process(
+    command: List[str],
+    *,
+    stdin_text: str,
+    timeout_seconds: int,
+    cwd: Path,
+    env: Dict[str, str],
+    cancel_event: Optional[threading.Event],
+) -> subprocess.CompletedProcess:
+    if cancel_event and cancel_event.is_set():
+        raise ScriptExecutionCancelled("Task cancellation was requested before launch")
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(cwd),
+        env=env,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + timeout_seconds
+    first_communicate = True
+    while True:
+        if cancel_event and cancel_event.is_set():
+            terminate_process_group(process)
+            raise ScriptExecutionCancelled(
+                "Task cancelled by submitter after process tree termination"
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            terminate_process_group(process)
+            raise ScriptExecutionTimeout(
+                f"script_job execution exceeded timeout_seconds={timeout_seconds}; "
+                "process tree terminated",
+                timeout_seconds=timeout_seconds,
+            )
+        try:
+            stdout, stderr = process.communicate(
+                input=stdin_text if first_communicate else None,
+                timeout=min(0.5, remaining),
+            )
+            return subprocess.CompletedProcess(
+                command,
+                process.returncode,
+                stdout,
+                stderr,
+            )
+        except subprocess.TimeoutExpired:
+            first_communicate = False
+
+
+def terminate_process_group(
+    process: subprocess.Popen,
+    grace_seconds: float = 10,
+) -> Tuple[str, str]:
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    try:
+        return process.communicate(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        return process.communicate()
 
 
 def build_job_env(

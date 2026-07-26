@@ -1,8 +1,16 @@
+import os
 import sys
+import threading
+import time
 
 import pytest
 
-from worker.script_runner import ScriptExecutionTimeout, run_script_job
+from worker.script_runner import (
+    ScriptExecutionCancelled,
+    ScriptExecutionTimeout,
+    bounded_timeout,
+    run_script_job,
+)
 
 
 def test_script_job_runs_python_in_cloudlink_runtime(monkeypatch, tmp_path):
@@ -193,6 +201,87 @@ def test_script_job_raises_execution_timeout(monkeypatch, tmp_path):
         )
 
     assert excinfo.value.error_code == "execution_timeout"
+
+
+def test_script_job_timeout_terminates_descendant_processes(monkeypatch, tmp_path):
+    job_root = tmp_path / "jobs"
+    monkeypatch.setenv("CLOUDLINK_JOB_ROOT", str(job_root))
+    monkeypatch.setenv("CLOUDLINK_SCRIPT_MAX_TIMEOUT_SECONDS", "5")
+    monkeypatch.setattr(
+        "worker.script_runner.ensure_python_auto_runtime",
+        lambda requirements: sys.executable,
+    )
+
+    with pytest.raises(ScriptExecutionTimeout):
+        run_script_job(
+            {
+                "script": (
+                    "import subprocess,sys,time\n"
+                    "from pathlib import Path\n"
+                    "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])\n"
+                    "Path('outputs/child.pid').write_text(str(child.pid))\n"
+                    "time.sleep(60)\n"
+                ),
+                "timeout_seconds": 1,
+            },
+            "local-worker-1",
+            task_id="task-tree-timeout",
+        )
+
+    child_pid = int(
+        (job_root / "task-tree-timeout" / "outputs" / "child.pid").read_text()
+    )
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("descendant process survived task timeout")
+
+
+def test_script_job_honors_cancel_event_and_isolates_attempt_directory(
+    monkeypatch,
+    tmp_path,
+):
+    job_root = tmp_path / "jobs"
+    monkeypatch.setenv("CLOUDLINK_JOB_ROOT", str(job_root))
+    monkeypatch.setattr(
+        "worker.script_runner.ensure_python_auto_runtime",
+        lambda requirements: sys.executable,
+    )
+    cancel_event = threading.Event()
+    timer = threading.Timer(0.2, cancel_event.set)
+    timer.start()
+    try:
+        with pytest.raises(ScriptExecutionCancelled):
+            run_script_job(
+                {
+                    "script": "import time\ntime.sleep(60)\n",
+                    "timeout_seconds": 30,
+                },
+                "local-worker-1",
+                task_id="task-cancel",
+                lease_id="lease-attempt-1",
+                cancel_event=cancel_event,
+            )
+    finally:
+        timer.cancel()
+
+    assert (job_root / "task-cancel" / "lease-attempt-1" / "main.py").is_file()
+
+
+def test_timeout_allows_explicit_multi_day_jobs(monkeypatch):
+    monkeypatch.delenv("CLOUDLINK_SCRIPT_MAX_TIMEOUT_SECONDS", raising=False)
+    assert bounded_timeout(14 * 24 * 60 * 60) == 14 * 24 * 60 * 60
+
+
+def test_timeout_rejects_instead_of_silently_clamping(monkeypatch):
+    monkeypatch.setenv("CLOUDLINK_SCRIPT_MAX_TIMEOUT_SECONDS", "100")
+    with pytest.raises(ValueError, match="exceeds worker maximum"):
+        bounded_timeout(101)
 
 
 def test_script_job_rejects_unsafe_input_path(monkeypatch, tmp_path):

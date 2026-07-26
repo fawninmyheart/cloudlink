@@ -1,7 +1,13 @@
 import argparse
 import json
 
-from scripts.submit_local_script_job import build_resource_request, resolve_task_timeout
+import pytest
+
+from scripts.submit_local_script_job import (
+    build_resource_request,
+    resolve_task_timeout,
+    resolve_wait_timeout,
+)
 
 
 def namespace(**overrides):
@@ -90,3 +96,22 @@ def test_resolve_task_timeout_defaults_to_30_minutes():
     args = argparse.Namespace(timeout=None, timeout_seconds=None)
 
     assert resolve_task_timeout(args) == 1800
+
+
+def test_wait_timeout_defaults_to_task_timeout_plus_shutdown_margin():
+    args = argparse.Namespace(wait_timeout_seconds=None)
+
+    assert resolve_wait_timeout(args, 14 * 24 * 60 * 60) == 14 * 24 * 60 * 60 + 300
+
+
+def test_wait_timeout_accepts_explicit_override():
+    args = argparse.Namespace(wait_timeout_seconds=60)
+
+    assert resolve_wait_timeout(args, 1800) == 60
+
+
+def test_wait_timeout_rejects_non_positive_value():
+    args = argparse.Namespace(wait_timeout_seconds=0)
+
+    with pytest.raises(SystemExit, match="must be positive"):
+        resolve_wait_timeout(args, 1800)

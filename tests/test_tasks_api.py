@@ -766,12 +766,12 @@ def test_worker_cannot_report_with_stale_lease(monkeypatch, tmp_path):
     assert claim["lease_id"] != "old-lease"
 
 
-def test_expired_running_task_can_be_reclaimed(monkeypatch, tmp_path):
+def test_expired_running_task_is_not_automatically_reclaimed(monkeypatch, tmp_path):
     client = make_client(monkeypatch, tmp_path)
     register_worker(client)
     register_worker(client, worker_id="local-worker-2")
     task_id = create_echo_task(client)
-    first_claim = client.post(
+    client.post(
         "/api/worker/claim",
         headers=worker_headers(),
         json={"worker_id": "local-worker-1", "supported_types": ["echo_test"]},
@@ -785,17 +785,15 @@ def test_expired_running_task_can_be_reclaimed(monkeypatch, tmp_path):
     )
 
     assert second_claim.status_code == 200
-    body = second_claim.json()["task"]
-    assert body["id"] == task_id
-    assert body["lease_id"] != first_claim["lease_id"]
+    assert second_claim.json() == {"task": None}
 
     task = client.get(f"/api/internal/tasks/{task_id}", headers=internal_headers()).json()
-    assert task["status"] == "running"
-    assert task["locked_by"] == "local-worker-2"
-    assert task["retry_count"] == 1
+    assert task["status"] == "timeout"
+    assert task["error_code"] == "worker_lost"
+    assert task["retry_count"] == 0
 
 
-def test_expired_running_task_times_out_after_max_retries(monkeypatch, tmp_path):
+def test_expired_running_task_is_terminal_regardless_of_retry_count(monkeypatch, tmp_path):
     client = make_client(monkeypatch, tmp_path)
     register_worker(client)
     task_id = create_echo_task(client)
@@ -816,7 +814,113 @@ def test_expired_running_task_times_out_after_max_retries(monkeypatch, tmp_path)
     assert claim.json() == {"task": None}
     task = client.get(f"/api/internal/tasks/{task_id}", headers=internal_headers()).json()
     assert task["status"] == "timeout"
-    assert "lock expired" in task["error"]
+    assert "not automatically retried" in task["error"]
+
+
+def test_expired_lease_cannot_be_revived_by_late_renewal(monkeypatch, tmp_path):
+    client = make_client(monkeypatch, tmp_path)
+    register_worker(client)
+    task_id = create_echo_task(client)
+    claim = client.post(
+        "/api/worker/claim",
+        headers=worker_headers(),
+        json={"worker_id": "local-worker-1", "supported_types": ["echo_test"]},
+    ).json()["task"]
+    expire_task_lock(client, task_id)
+
+    renewal = client.post(
+        f"/api/worker/tasks/{task_id}/lease",
+        headers=worker_headers(),
+        json={
+            "worker_id": "local-worker-1",
+            "lease_id": claim["lease_id"],
+        },
+    )
+
+    assert renewal.status_code == 409
+    task = client.get(f"/api/internal/tasks/{task_id}", headers=internal_headers()).json()
+    assert task["status"] == "timeout"
+    assert task["error_code"] == "worker_lost"
+
+
+def test_worker_can_renew_lease_and_receive_running_cancel(monkeypatch, tmp_path):
+    client = make_client(monkeypatch, tmp_path)
+    register_worker(client)
+    task_id = create_echo_task(client)
+    claim = client.post(
+        "/api/worker/claim",
+        headers=worker_headers(),
+        json={"worker_id": "local-worker-1", "supported_types": ["echo_test"]},
+    ).json()["task"]
+
+    cancel = client.post(
+        f"/api/internal/tasks/{task_id}/cancel",
+        headers=internal_headers(),
+        json={"reason": "stop long model run"},
+    )
+    assert cancel.status_code == 200
+    assert cancel.json()["status"] == "running"
+    assert cancel.json()["cancel_requested_at"]
+
+    renewal = client.post(
+        f"/api/worker/tasks/{task_id}/lease",
+        headers=worker_headers(),
+        json={
+            "worker_id": "local-worker-1",
+            "lease_id": claim["lease_id"],
+        },
+    )
+    assert renewal.status_code == 200
+    assert renewal.json()["cancel_requested"] is True
+    assert renewal.json()["cancel_reason"] == "stop long model run"
+
+    cancelled = client.post(
+        f"/api/worker/tasks/{task_id}/failed",
+        headers=worker_headers(),
+        json={
+            "worker_id": "local-worker-1",
+            "lease_id": claim["lease_id"],
+            "error": "process tree terminated",
+            "error_code": "cancelled",
+            "logs": "",
+        },
+    )
+    assert cancelled.status_code == 200
+    task = client.get(f"/api/internal/tasks/{task_id}", headers=internal_headers()).json()
+    assert task["status"] == "cancelled"
+
+
+def test_running_cancel_wins_over_late_success_report(monkeypatch, tmp_path):
+    client = make_client(monkeypatch, tmp_path)
+    register_worker(client)
+    task_id = create_echo_task(client)
+    claim = client.post(
+        "/api/worker/claim",
+        headers=worker_headers(),
+        json={"worker_id": "local-worker-1", "supported_types": ["echo_test"]},
+    ).json()["task"]
+    client.post(
+        f"/api/internal/tasks/{task_id}/cancel",
+        headers=internal_headers(),
+        json={"reason": "stop before accepting result"},
+    )
+
+    response = client.post(
+        f"/api/worker/tasks/{task_id}/success",
+        headers=worker_headers(),
+        json={
+            "worker_id": "local-worker-1",
+            "lease_id": claim["lease_id"],
+            "result": {"ok": True},
+            "logs": "late success",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    task = client.get(f"/api/internal/tasks/{task_id}", headers=internal_headers()).json()
+    assert task["status"] == "cancelled"
+    assert task["error_code"] == "cancelled"
 
 
 def test_worker_reports_failed_for_owned_task(monkeypatch, tmp_path):

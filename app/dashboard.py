@@ -334,7 +334,7 @@ def dashboard_html() -> str:
       white-space: nowrap;
     }
     .state.success, .state.online, .state.cached, .state.extracted, .state.ok { color: var(--ok); background: var(--ok-bg); }
-    .state.running, .state.downloading { color: var(--accent); background: var(--accent-soft); }
+    .state.running, .state.cancelling, .state.downloading { color: var(--accent); background: var(--accent-soft); }
     .state.pending, .state.delete_requested { color: var(--warn); background: var(--warn-bg); }
     .state.failed, .state.timeout, .state.offline, .state.missing, .state.invalid, .state.needs_update, .state.unsupported_platform { color: var(--bad); background: var(--bad-bg); }
     .state.idle, .state.deleted, .state.disabled { color: var(--idle); background: var(--idle-bg); }
@@ -1056,6 +1056,7 @@ def dashboard_html() -> str:
     const taskStatusLabels = {
       pending: "待领取",
       running: "执行中",
+      cancelling: "正在取消",
       success: "成功",
       failed: "失败",
       timeout: "超时",
@@ -1388,6 +1389,12 @@ def dashboard_html() -> str:
         lifecycle: durationLabel(lifecycle),
         combined: `${durationLabel(runtime)} / ${durationLabel(lifecycle)}`,
       };
+    }
+
+    function taskDisplayStatus(task) {
+      return task.status === "running" && task.cancel_requested_at
+        ? "cancelling"
+        : task.status;
     }
 
     function labelFor(value, labels) {
@@ -1954,7 +1961,7 @@ def dashboard_html() -> str:
             <div class="primary-text mono">${esc(shortId(task.id))}</div>
             <div class="muted">重试 ${esc(task.retry_count || 0)}</div>
           </td>
-          <td>${state(task.status, taskStatusLabels)}</td>
+          <td>${state(taskDisplayStatus(task), taskStatusLabels)}</td>
           <td>${esc(task.type || "-")}</td>
           <td>${esc(taskWorker(task))}</td>
           <td>${esc(taskDurations(task).combined)}</td>
@@ -1996,7 +2003,7 @@ def dashboard_html() -> str:
       return `
         <div class="detail-grid">
           <div class="kv"><span>任务 ID</span><strong class="mono">${esc(task.id)}</strong></div>
-          <div class="kv"><span>状态</span><strong>${state(task.status, taskStatusLabels)}</strong></div>
+          <div class="kv"><span>状态</span><strong>${state(taskDisplayStatus(task), taskStatusLabels)}</strong></div>
           <div class="kv"><span>类型</span><strong>${esc(task.type || "-")}</strong></div>
           <div class="kv"><span>执行节点</span><strong>${esc(taskWorker(task))}</strong></div>
           <div class="kv"><span>脚本运行耗时</span><strong>${esc(durations.runtime)}</strong></div>

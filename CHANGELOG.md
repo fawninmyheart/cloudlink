@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026.07.27.1
+
+### Long-Running Task Control
+
+- Replaced fixed timeout-derived leases with renewable task leases.
+- Removed automatic reclaim of expired running script jobs; lease loss now
+  enters terminal `worker_lost`.
+- Added submitter cancellation for running tasks with worker acknowledgement.
+- Script timeout and cancellation now terminate the entire POSIX process group,
+  including micromamba, Python, and CUDA descendants.
+- Isolated every execution attempt under `<task_id>/<lease_id>`.
+- Raised the default explicit script timeout ceiling to one year and reject
+  oversized values instead of silently clamping them.
+- Raised both CPU and GPU minimum worker versions to `2026.07.27.1`.
+
 ## 2026.07.26.5
 
 ### GPU Runtime Validation

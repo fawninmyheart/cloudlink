@@ -17,7 +17,11 @@ try:
     from worker.dataset_manager import DatasetManager
     from worker.gpu_runtime import GpuRuntimeValidationTimeout, validate_gpu_runtime
     from worker.hardware import collect_worker_profiles
-    from worker.script_runner import ScriptExecutionTimeout, run_script_job
+    from worker.script_runner import (
+        ScriptExecutionCancelled,
+        ScriptExecutionTimeout,
+        run_script_job,
+    )
 except ModuleNotFoundError:  # pragma: no cover - supports direct script execution.
     from api_client import ApiRequestError, WorkerApiClient
     from artifact_manager import ResultArtifactUploader
@@ -25,7 +29,7 @@ except ModuleNotFoundError:  # pragma: no cover - supports direct script executi
     from dataset_manager import DatasetManager
     from gpu_runtime import GpuRuntimeValidationTimeout, validate_gpu_runtime
     from hardware import collect_worker_profiles
-    from script_runner import ScriptExecutionTimeout, run_script_job
+    from script_runner import ScriptExecutionCancelled, ScriptExecutionTimeout, run_script_job
 
 
 class CloudWorker:
@@ -318,7 +322,11 @@ class CloudWorker:
             body["error_code"] = error_code
         self.post_json(f"/api/worker/tasks/{task_id}/failed", body)
 
-    def run_task(self, task: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    def run_task(
+        self,
+        task: Dict[str, Any],
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Tuple[Dict[str, Any], str]:
         task_type = task["type"]
         payload = task["payload"]
         if task_type == "echo_test":
@@ -342,11 +350,41 @@ class CloudWorker:
                 payload,
                 self.worker_id,
                 task["id"],
+                lease_id=task["lease_id"],
                 dataset_env=datasets.env,
                 dataset_records=datasets.records,
                 artifact_uploader=artifact_uploader,
+                cancel_event=cancel_event,
             )
         raise ValueError(f"Unsupported task type: {task_type}")
+
+    def task_lease_loop(
+        self,
+        task_id: str,
+        lease_id: str,
+        cancel_event: threading.Event,
+        stop_event: threading.Event,
+    ) -> None:
+        interval = self.config.task_lease_renew_seconds
+        while not stop_event.wait(interval):
+            try:
+                response = self.post_json(
+                    f"/api/worker/tasks/{task_id}/lease",
+                    {
+                        "worker_id": self.worker_id,
+                        "lease_id": lease_id,
+                    },
+                )
+                if response.get("cancel_requested"):
+                    cancel_event.set()
+            except ApiRequestError as exc:
+                if exc.status_code == 409:
+                    self.log(f"task {task_id} lease was revoked; terminating task")
+                    cancel_event.set()
+                    return
+                self.log(f"task {task_id} lease renewal failed: {exc}; will retry")
+            except Exception as exc:
+                self.log(f"task {task_id} lease renewal error: {exc}; will retry")
 
     def process_delete_requests_best_effort(self) -> None:
         try:
@@ -395,10 +433,32 @@ class CloudWorker:
     def run_and_report_task(self, task: Dict[str, Any]) -> None:
         task_id = task["id"]
         lease_id = task["lease_id"]
+        cancel_event = threading.Event()
+        lease_stop_event = threading.Event()
+        lease_thread = threading.Thread(
+            target=self.task_lease_loop,
+            args=(task_id, lease_id, cancel_event, lease_stop_event),
+            name=f"cloudlink-lease-{task_id[:8]}",
+            daemon=True,
+        )
+        lease_thread.start()
         try:
-            result, logs = self.run_task(task)
+            result, logs = self.run_task(task, cancel_event)
             self.report_success(task_id, lease_id, result, logs)
             self.log(f"reported success for task {task_id}")
+        except ScriptExecutionCancelled as exc:
+            logs = traceback.format_exc()
+            self.log(f"task {task_id} cancelled: {exc}")
+            try:
+                self.report_failed(
+                    task_id,
+                    lease_id,
+                    str(exc),
+                    logs,
+                    error_code=exc.error_code,
+                )
+            except Exception as report_exc:
+                self.log(f"failed to report task cancellation for {task_id}: {report_exc}")
         except ScriptExecutionTimeout as exc:
             logs = traceback.format_exc()
             self.log(f"task {task_id} execution timed out: {exc}")
@@ -426,6 +486,8 @@ class CloudWorker:
             except Exception as report_exc:
                 self.log(f"failed to report task failure for {task_id}: {report_exc}")
         finally:
+            lease_stop_event.set()
+            lease_thread.join(timeout=1)
             with self.active_tasks_lock:
                 self.active_tasks.pop(task_id, None)
 

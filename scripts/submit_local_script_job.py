@@ -142,6 +142,14 @@ def resolve_task_timeout(args: argparse.Namespace) -> int:
     return value
 
 
+def resolve_wait_timeout(args: argparse.Namespace, task_timeout: int) -> int:
+    if args.wait_timeout_seconds is None:
+        return task_timeout + 300
+    if args.wait_timeout_seconds <= 0:
+        raise SystemExit("--wait-timeout-seconds must be positive")
+    return args.wait_timeout_seconds
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Submit a Cloudlink script job from trusted server-side code."
@@ -206,8 +214,14 @@ def main() -> int:
     )
     parser.add_argument("--wait", action="store_true")
     parser.add_argument("--poll-seconds", type=float, default=5)
-    parser.add_argument("--wait-timeout-seconds", type=int, default=7200)
+    parser.add_argument(
+        "--wait-timeout-seconds",
+        type=int,
+        default=None,
+        help="Maximum wait time. Default: task timeout plus 300 seconds.",
+    )
     args = parser.parse_args()
+    task_timeout = resolve_task_timeout(args)
 
     stdin_text = args.stdin or ""
     if args.stdin_file:
@@ -226,7 +240,7 @@ def main() -> int:
         "expected_artifacts": [
             parse_expected_artifact(item) for item in args.expected_artifact
         ],
-        "timeout_seconds": resolve_task_timeout(args),
+        "timeout_seconds": task_timeout,
     }
     resource_request = build_resource_request(args)
     if resource_request:
@@ -252,7 +266,8 @@ def main() -> int:
     if not args.wait:
         return 0
 
-    deadline = time.time() + args.wait_timeout_seconds
+    wait_timeout = resolve_wait_timeout(args, task_timeout)
+    deadline = time.time() + wait_timeout
     while time.time() < deadline:
         task = request_json(
             "GET",
