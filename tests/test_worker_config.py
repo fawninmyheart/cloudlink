@@ -23,7 +23,9 @@ def test_load_worker_config_applies_defaults_and_normalizes_values():
     assert config.api_retries == 3
     assert config.api_retry_base_seconds == 1
     assert config.api_retry_max_seconds == 15
+    assert config.result_report_timeout_seconds == 300
     assert config.artifact_upload_retries == 6
+    assert config.artifact_upload_timeout_seconds == 300
     assert config.artifact_retry_base_seconds == 2
     assert config.artifact_retry_max_seconds == 60
     assert config.poll_interval_seconds == 5

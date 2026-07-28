@@ -1,6 +1,9 @@
 import json
 import tarfile
+import threading
+import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -88,6 +91,51 @@ def test_dataset_manager_downloads_extracts_and_reuses_archive(tmp_path, monkeyp
     )
     assert len(api_client.reports) == report_count + 1
     assert api_client.reports[-1][1]["status"] == "extracted"
+
+
+def test_concurrent_first_download_of_same_dataset_is_serialized(tmp_path):
+    payload = b"shared dataset payload"
+    source = tmp_path / "source.bin"
+    source.write_bytes(payload)
+    metadata = {
+        "id": "dataset-version-concurrent",
+        "dataset_name": "shared",
+        "version": "v1",
+        "source_kind": "owned_file",
+        "filename": "source.bin",
+        "size_bytes": len(payload),
+        "checksum_sha256": file_sha256(source),
+        "archive_format": None,
+        "extract_required": False,
+        "manifest": {},
+        "download_url": "/api/worker/datasets/dataset-version-concurrent/download?worker_id=local-worker-a",
+    }
+    manager, api_client = make_manager(tmp_path, metadata, payload)
+    download_count = 0
+    download_lock = threading.Lock()
+    original_download = api_client.download_to_path
+
+    def slow_download(path, target, **kwargs):
+        nonlocal download_count
+        with download_lock:
+            download_count += 1
+        time.sleep(0.05)
+        original_download(path, target, **kwargs)
+
+    api_client.download_to_path = slow_download
+    barrier = threading.Barrier(2)
+
+    def ensure():
+        barrier.wait()
+        return manager.ensure_one_dataset(metadata)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        paths = list(executor.map(lambda _index: ensure(), range(2)))
+
+    assert paths[0] == paths[1]
+    assert paths[0].read_bytes() == payload
+    assert download_count == 1
+    assert not list(paths[0].parent.glob("*.tmp"))
 
 
 def test_dataset_manager_reuses_valid_readonly_root(tmp_path):

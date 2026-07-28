@@ -3,6 +3,7 @@ import threading
 from pathlib import Path
 
 import worker.local_worker as local_worker_module
+from worker.api_client import ApiRequestError
 from worker.config import WorkerConfig
 from worker.gpu_runtime import GpuRuntimeValidationTimeout
 from worker.local_worker import CloudWorker
@@ -471,6 +472,7 @@ def test_worker_passes_artifact_uploader_to_script_jobs(monkeypatch):
         "expected_artifacts": [{"path": "big.csv", "title": "Big CSV"}],
         "manifest": None,
         "upload_retries": 6,
+        "upload_timeout_seconds": 300,
         "retry_base_seconds": 2,
         "retry_max_seconds": 60,
     }
@@ -510,6 +512,53 @@ def test_worker_reports_execution_timeout_with_error_code(monkeypatch):
     assert reported["task_id"] == "task-timeout"
     assert reported["lease_id"] == "lease-timeout"
     assert reported["error_code"] == "execution_timeout"
+
+
+def test_success_report_timeout_preserves_and_retries_result(monkeypatch, tmp_path):
+    configure_worker_env(monkeypatch)
+    monkeypatch.setenv("CLOUDLINK_HOME", str(tmp_path / "cloudlink-home"))
+    monkeypatch.setenv("WORKER_API_RETRY_BASE_SECONDS", "0.001")
+    worker = CloudWorker()
+    calls = []
+    reported_failed = []
+
+    monkeypatch.setattr(
+        worker,
+        "run_task",
+        lambda _task, _cancel_event: ({"prediction": [1, 2, 3]}, "done"),
+    )
+
+    def flaky_report(task_id, lease_id, result, logs):
+        calls.append((task_id, lease_id, result, logs))
+        if len(calls) == 1:
+            raise ApiRequestError(
+                "response lost",
+                method="POST",
+                path=f"/api/worker/tasks/{task_id}/success",
+                attempt=4,
+                elapsed_seconds=1,
+                original=TimeoutError("response lost"),
+            )
+
+    monkeypatch.setattr(worker, "report_success", flaky_report)
+    monkeypatch.setattr(
+        worker,
+        "report_failed",
+        lambda *args, **kwargs: reported_failed.append((args, kwargs)),
+    )
+
+    worker.run_and_report_task(
+        {
+            "id": "task-result",
+            "type": "script_job",
+            "lease_id": "lease-result",
+            "payload": {"script": "print('ok')"},
+        }
+    )
+
+    assert len(calls) == 2
+    assert reported_failed == []
+    assert not (worker.completion_outbox_dir() / "task-result.json").exists()
 
 
 def test_task_lease_loop_delivers_cancel_request(monkeypatch):
@@ -571,7 +620,9 @@ def test_doctor_uses_safe_claim_probe_and_hides_secret(monkeypatch, capsys):
         api_retries=0,
         api_retry_base_seconds=0.01,
         api_retry_max_seconds=1,
+        result_report_timeout_seconds=30,
         artifact_upload_retries=0,
+        artifact_upload_timeout_seconds=30,
         artifact_retry_base_seconds=0.01,
         artifact_retry_max_seconds=1,
         poll_interval_seconds=1,

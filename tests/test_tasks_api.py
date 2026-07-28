@@ -1,4 +1,5 @@
 import importlib
+import hashlib
 import json
 import sqlite3
 
@@ -715,6 +716,88 @@ def test_worker_reports_success_for_owned_task(monkeypatch, tmp_path):
     assert task["result"] == {"echo": "hello", "worker_id": "local-worker-1"}
     assert task["logs"] == "done"
     assert task["finished_at"]
+
+
+def test_worker_success_report_is_idempotent_after_response_loss(monkeypatch, tmp_path):
+    client = make_client(monkeypatch, tmp_path)
+    register_worker(client)
+    task_id = create_echo_task(client)
+    claim = client.post(
+        "/api/worker/claim",
+        headers=worker_headers(),
+        json={"worker_id": "local-worker-1", "supported_types": ["echo_test"]},
+    ).json()["task"]
+    result = {"echo": "hello", "worker_id": "local-worker-1"}
+    result_sha256 = hashlib.sha256(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    body = {
+        "worker_id": "local-worker-1",
+        "lease_id": claim["lease_id"],
+        "result_sha256": result_sha256,
+        "result": result,
+        "logs": "done",
+    }
+
+    first = client.post(
+        f"/api/worker/tasks/{task_id}/success",
+        headers=worker_headers(),
+        json=body,
+    )
+    repeated = client.post(
+        f"/api/worker/tasks/{task_id}/success",
+        headers=worker_headers(),
+        json=body,
+    )
+
+    assert first.status_code == 200
+    assert repeated.status_code == 200
+    task = client.get(f"/api/internal/tasks/{task_id}", headers=internal_headers()).json()
+    assert task["result_sha256"] == result_sha256
+    assert task["completion_lease_id"] == claim["lease_id"]
+
+
+def test_worker_reports_large_success_payload(monkeypatch, tmp_path):
+    client = make_client(monkeypatch, tmp_path)
+    register_worker(client)
+    task_id = create_echo_task(client)
+    claim = client.post(
+        "/api/worker/claim",
+        headers=worker_headers(),
+        json={"worker_id": "local-worker-1", "supported_types": ["echo_test"]},
+    ).json()["task"]
+    result = {"encoded_evidence": "x" * (900 * 1024)}
+    result_sha256 = hashlib.sha256(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    response = client.post(
+        f"/api/worker/tasks/{task_id}/success",
+        headers=worker_headers(),
+        json={
+            "worker_id": "local-worker-1",
+            "lease_id": claim["lease_id"],
+            "result_sha256": result_sha256,
+            "result": result,
+            "logs": "large result",
+        },
+    )
+
+    assert response.status_code == 200
+    task = client.get(f"/api/internal/tasks/{task_id}", headers=internal_headers()).json()
+    assert task["status"] == "success"
+    assert task["result_sha256"] == result_sha256
+    assert len(task["result"]["encoded_evidence"]) == 900 * 1024
 
 
 def test_worker_cannot_report_for_another_worker(monkeypatch, tmp_path):

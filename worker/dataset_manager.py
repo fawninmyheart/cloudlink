@@ -5,12 +5,16 @@ import re
 import shutil
 import tarfile
 import tempfile
+import threading
 import urllib.parse
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+import fcntl
 
 try:
     from worker.api_client import WorkerApiClient
@@ -23,6 +27,10 @@ MOUNT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 class UnsafeArchiveError(Exception):
     pass
+
+
+class DatasetCacheFailed(Exception):
+    error_code = "dataset_cache_failed"
 
 
 @dataclass
@@ -48,6 +56,8 @@ class DatasetManager:
         self.download_retries = download_retries
         self.roots = dataset_roots_from_env()
         self.root = self.active_root()
+        self._lock_guard = threading.Lock()
+        self._dataset_locks: Dict[str, threading.Lock] = {}
 
     def set_roots(self, roots: Iterable[Dict[str, Any]]) -> None:
         normalized = normalize_root_specs(roots)
@@ -167,8 +177,15 @@ class DatasetManager:
             if not MOUNT_NAME.match(mount_name):
                 raise ValueError("mount_name must be a shell-safe identifier")
 
-            metadata = self.fetch_metadata(dataset_version_id)
-            path = self.ensure_one_dataset(metadata)
+            try:
+                metadata = self.fetch_metadata(dataset_version_id)
+                path = self.ensure_one_dataset(metadata)
+            except (DatasetCacheFailed, UnsafeArchiveError, ValueError):
+                raise
+            except Exception as exc:
+                raise DatasetCacheFailed(
+                    f"dataset {dataset_version_id} cache failed: {exc}"
+                ) from exc
             env_key = f"CLOUDLINK_DATASET_{mount_name.upper()}"
             env[env_key] = str(path)
             records.append(
@@ -193,6 +210,15 @@ class DatasetManager:
         )
 
     def ensure_one_dataset(self, metadata: Dict[str, Any]) -> Path:
+        dataset_version_id = metadata["id"]
+        with self._lock_guard:
+            lock = self._dataset_locks.setdefault(dataset_version_id, threading.Lock())
+        with lock:
+            lock_root = self.active_writable_root()
+            with dataset_file_lock(lock_root, dataset_version_id):
+                return self._ensure_one_dataset_locked(metadata)
+
+    def _ensure_one_dataset_locked(self, metadata: Dict[str, Any]) -> Path:
         dataset_version_id = metadata["id"]
         for root_spec in self.usable_roots():
             root = Path(root_spec["path"]).expanduser()
@@ -244,25 +270,32 @@ class DatasetManager:
         archive_path = self.archive_path(root, metadata)
         manifest_path = archive_dir / "manifest.json"
 
-        tmp_path = archive_path.with_suffix(archive_path.suffix + ".tmp")
+        tmp_file = tempfile.NamedTemporaryFile(
+            dir=archive_dir,
+            prefix=f".{archive_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        )
+        tmp_path = Path(tmp_file.name)
+        tmp_file.close()
         self.report_cache(
             metadata,
             "downloading",
             local_archive_path=str(archive_path),
             data_root_path=str(root),
         )
-        self.api_client.download_to_path(
-            metadata["download_url"],
-            tmp_path,
-            timeout=self.download_timeout_seconds,
-            retries=self.download_retries,
-        )
-        validate_download(tmp_path, metadata)
-        tmp_path.replace(archive_path)
-        manifest_path.write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        try:
+            self.api_client.download_to_path(
+                metadata["download_url"],
+                tmp_path,
+                timeout=self.download_timeout_seconds,
+                retries=self.download_retries,
+            )
+            validate_download(tmp_path, metadata)
+            tmp_path.replace(archive_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        atomic_write_json(manifest_path, metadata)
 
         if metadata.get("extract_required"):
             extracted_dir = self.ensure_extracted(root, archive_path, metadata)
@@ -553,6 +586,38 @@ def normalize_root_specs(roots: Iterable[Dict[str, Any]]) -> List[Dict[str, str]
                 root["mode"] = "active"
                 break
     return normalized
+
+
+@contextmanager
+def dataset_file_lock(root: Path, dataset_version_id: str):
+    lock_dir = root / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_name = hashlib.sha256(dataset_version_id.encode("utf-8")).hexdigest()
+    lock_path = lock_dir / f"{lock_name}.lock"
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def atomic_write_json(path: Path, value: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        mode="w",
+        encoding="utf-8",
+        delete=False,
+    ) as file:
+        tmp_path = Path(file.name)
+        json.dump(value, file, ensure_ascii=False, indent=2)
+    try:
+        tmp_path.replace(path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def expected_extract_marker(

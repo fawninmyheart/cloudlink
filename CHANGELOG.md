@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026.07.29.1
+
+### Reliable Result Delivery
+
+- Serialized first-time dataset downloads by version with process and file
+  locks, unique temporary files, checksum validation, and atomic publication.
+- Reduced artifact chunks to 256 KiB, added a dedicated 300-second upload
+  timeout, and query upload progress after every lost chunk response.
+- Added `artifact_upload_failed` and `dataset_cache_failed` worker error codes.
+- Made success reports idempotent using the task lease and canonical result
+  SHA-256.
+- Persisted unacknowledged success payloads in a worker completion outbox and
+  retry them without changing completed computation to `failed`.
+- Added a dedicated 300-second result-report timeout and documented reverse
+  proxy request streaming and timeout settings.
+- Raised both CPU and GPU minimum worker versions to `2026.07.29.1`.
+
 ## 2026.07.27.1
 
 ### Long-Running Task Control

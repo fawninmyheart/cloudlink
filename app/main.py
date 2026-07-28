@@ -185,6 +185,7 @@ class ClaimTaskRequest(BaseModel):
 class SuccessRequest(BaseModel):
     worker_id: str = Field(min_length=1)
     lease_id: str = Field(min_length=1)
+    result_sha256: Optional[str] = Field(default=None, min_length=64, max_length=64)
     result: Dict[str, Any]
     logs: Optional[str] = None
 
@@ -1664,6 +1665,7 @@ def api_report_success(
             task_id,
             body.worker_id,
             body.lease_id,
+            body.result_sha256,
             body.result,
             body.logs,
         )

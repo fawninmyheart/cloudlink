@@ -157,7 +157,8 @@ def test_upload_large_output_uses_artifact_retry_policy(tmp_path):
     uploader.upload(output, tmp_path)
 
     assert api.uploaded[0][2] == {
-        "retries": 6,
+        "timeout": 300,
+        "retries": 0,
         "retry_base_seconds": 2,
         "retry_max_seconds": 60,
     }

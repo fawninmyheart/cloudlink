@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -294,15 +295,122 @@ class CloudWorker:
         result: Dict[str, Any],
         logs: str,
     ) -> None:
-        self.post_json(
+        result_sha256 = hashlib.sha256(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self.api_client.post_json(
             f"/api/worker/tasks/{task_id}/success",
             {
                 "worker_id": self.worker_id,
                 "lease_id": lease_id,
+                "result_sha256": result_sha256,
                 "result": result,
                 "logs": logs,
             },
+            timeout=self.config.result_report_timeout_seconds,
         )
+
+    def completion_outbox_dir(self) -> Path:
+        return Path(
+            os.getenv(
+                "CLOUDLINK_COMPLETION_OUTBOX",
+                str(
+                    Path(os.getenv("CLOUDLINK_HOME", "~/.cloudlink")).expanduser()
+                    / "completion-outbox"
+                ),
+            )
+        ).expanduser()
+
+    def persist_completion(
+        self,
+        task_id: str,
+        lease_id: str,
+        result: Dict[str, Any],
+        logs: str,
+    ) -> Path:
+        outbox = self.completion_outbox_dir()
+        outbox.mkdir(parents=True, exist_ok=True)
+        outbox.chmod(0o700)
+        target = outbox / f"{task_id}.json"
+        tmp = outbox / f".{task_id}.{os.getpid()}.{threading.get_ident()}.tmp"
+        tmp.write_text(
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "lease_id": lease_id,
+                    "result": result,
+                    "logs": logs,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        tmp.chmod(0o600)
+        tmp.replace(target)
+        return target
+
+    def report_success_reliably(
+        self,
+        task_id: str,
+        lease_id: str,
+        result: Dict[str, Any],
+        logs: str,
+    ) -> None:
+        outbox_path = self.persist_completion(task_id, lease_id, result, logs)
+        attempt = 0
+        while not self.stop_event.is_set():
+            attempt += 1
+            try:
+                self.report_success(task_id, lease_id, result, logs)
+                outbox_path.unlink(missing_ok=True)
+                return
+            except ApiRequestError as exc:
+                self.last_error = (
+                    f"result_report_timeout task={task_id} attempt={attempt}: {exc}"
+                )
+                self.log(
+                    f"success report pending for task {task_id}; "
+                    f"result preserved in {outbox_path}; will retry: {exc}"
+                )
+                if exc.status_code is not None and exc.status_code < 500:
+                    return
+            except Exception as exc:
+                self.last_error = f"result_report_failed task={task_id}: {exc}"
+                self.log(
+                    f"success report pending for task {task_id}; "
+                    f"result preserved in {outbox_path}: {exc}"
+                )
+                return
+            self.stop_event.wait(
+                min(
+                    self.config.api_retry_max_seconds,
+                    self.config.api_retry_base_seconds * (2 ** min(attempt - 1, 6)),
+                )
+            )
+
+    def replay_completion_outbox(self) -> None:
+        outbox = self.completion_outbox_dir()
+        if not outbox.exists():
+            return
+        for path in sorted(outbox.glob("*.json")):
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+                self.report_success(
+                    item["task_id"],
+                    item["lease_id"],
+                    item["result"],
+                    item.get("logs") or "",
+                )
+                path.unlink(missing_ok=True)
+                self.log(f"replayed preserved success for task {item['task_id']}")
+            except Exception as exc:
+                self.last_error = f"result_report_replay_failed file={path.name}: {exc}"
+                self.log(f"preserved success still pending in {path}: {exc}")
 
     def report_failed(
         self,
@@ -343,6 +451,7 @@ class CloudWorker:
                 expected_artifacts=payload.get("expected_artifacts", []),
                 manifest=None,
                 upload_retries=self.config.artifact_upload_retries,
+                upload_timeout_seconds=self.config.artifact_upload_timeout_seconds,
                 retry_base_seconds=self.config.artifact_retry_base_seconds,
                 retry_max_seconds=self.config.artifact_retry_max_seconds,
             )
@@ -444,8 +553,9 @@ class CloudWorker:
         lease_thread.start()
         try:
             result, logs = self.run_task(task, cancel_event)
-            self.report_success(task_id, lease_id, result, logs)
-            self.log(f"reported success for task {task_id}")
+            self.report_success_reliably(task_id, lease_id, result, logs)
+            if not self.completion_outbox_dir().joinpath(f"{task_id}.json").exists():
+                self.log(f"reported success for task {task_id}")
         except ScriptExecutionCancelled as exc:
             logs = traceback.format_exc()
             self.log(f"task {task_id} cancelled: {exc}")
@@ -516,6 +626,7 @@ class CloudWorker:
             thread.join(timeout=timeout)
 
     def run_forever(self) -> None:
+        self.replay_completion_outbox()
         self.log(
             f"worker {self.worker_id} started; supported_types={self.supported_types}"
         )

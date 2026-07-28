@@ -1,6 +1,7 @@
 import hashlib
 import mimetypes
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -15,10 +16,14 @@ def file_sha256(path: Path) -> str:
 
 def artifact_chunk_bytes() -> int:
     try:
-        configured = int(os.getenv("CLOUDLINK_ARTIFACT_CHUNK_BYTES", "4194304"))
+        configured = int(os.getenv("CLOUDLINK_ARTIFACT_CHUNK_BYTES", "262144"))
     except ValueError:
-        configured = 4194304
+        configured = 262144
     return max(1, configured)
+
+
+class ArtifactUploadFailed(Exception):
+    error_code = "artifact_upload_failed"
 
 
 class ResultArtifactUploader:
@@ -32,6 +37,7 @@ class ResultArtifactUploader:
         expected_artifacts: Optional[List[Dict[str, Any]]] = None,
         manifest: Optional[Dict[str, Any]] = None,
         upload_retries: int = 6,
+        upload_timeout_seconds: float = 300,
         retry_base_seconds: float = 2,
         retry_max_seconds: float = 60,
     ) -> None:
@@ -40,6 +46,7 @@ class ResultArtifactUploader:
         self.task_id = task_id
         self.lease_id = lease_id
         self.upload_retries = upload_retries
+        self.upload_timeout_seconds = upload_timeout_seconds
         self.retry_base_seconds = retry_base_seconds
         self.retry_max_seconds = retry_max_seconds
         self.expected_artifacts = expected_artifacts or []
@@ -64,6 +71,7 @@ class ResultArtifactUploader:
             expected_artifacts=self.expected_artifacts,
             manifest=manifest,
             upload_retries=self.upload_retries,
+            upload_timeout_seconds=self.upload_timeout_seconds,
             retry_base_seconds=self.retry_base_seconds,
             retry_max_seconds=self.retry_max_seconds,
         )
@@ -97,15 +105,22 @@ class ResultArtifactUploader:
         }
 
     def upload(self, path: Path, output_dir: Path) -> Dict[str, Any]:
-        relative_path = str(path.relative_to(output_dir))
-        size_bytes = path.stat().st_size
-        sha256 = file_sha256(path)
-        metadata = self.metadata_for(relative_path, size_bytes, sha256)
-        created = self.api_client.post_json(
-            f"/api/worker/tasks/{self.task_id}/artifacts",
-            {"worker_id": self.worker_id, "lease_id": self.lease_id, **metadata},
-        )
-        self.upload_file_chunks(created["id"], path, size_bytes)
+        try:
+            relative_path = str(path.relative_to(output_dir))
+            size_bytes = path.stat().st_size
+            sha256 = file_sha256(path)
+            metadata = self.metadata_for(relative_path, size_bytes, sha256)
+            created = self.api_client.post_json(
+                f"/api/worker/tasks/{self.task_id}/artifacts",
+                {"worker_id": self.worker_id, "lease_id": self.lease_id, **metadata},
+            )
+            self.upload_file_chunks(created["id"], path, size_bytes)
+        except ArtifactUploadFailed:
+            raise
+        except Exception as exc:
+            raise ArtifactUploadFailed(
+                f"artifact upload failed for {path.name}: {exc}"
+            ) from exc
         return {
             "path": relative_path,
             "title": metadata["title"],
@@ -128,33 +143,49 @@ class ResultArtifactUploader:
         if status.get("status") == "uploaded":
             return
         offset = int(status.get("uploaded_bytes") or 0)
+        chunk_attempt = 0
         with path.open("rb") as file:
             while offset < size_bytes:
                 file.seek(offset)
                 chunk = file.read(min(chunk_size, size_bytes - offset))
                 if not chunk:
                     break
+                chunk_attempt += 1
                 try:
                     response = self.api_client.put_bytes(
                         self.chunk_path(artifact_id, offset),
                         chunk,
-                        retries=self.upload_retries,
+                        timeout=self.upload_timeout_seconds,
+                        retries=0,
                         retry_base_seconds=self.retry_base_seconds,
                         retry_max_seconds=self.retry_max_seconds,
                     )
-                except Exception:
+                except Exception as exc:
                     status = self.upload_status(artifact_id)
                     if status.get("status") == "uploaded":
                         return
                     uploaded_bytes = int(status.get("uploaded_bytes") or 0)
                     if uploaded_bytes > offset:
                         offset = uploaded_bytes
+                        chunk_attempt = 0
                         continue
-                    raise
+                    if chunk_attempt >= self.upload_retries + 1:
+                        raise ArtifactUploadFailed(
+                            f"artifact chunk upload failed at offset {offset}: {exc}"
+                        ) from exc
+                    time.sleep(
+                        min(
+                            self.retry_max_seconds,
+                            self.retry_base_seconds
+                            * (2 ** max(0, chunk_attempt - 1)),
+                        )
+                    )
+                    continue
                 if response.get("status") == "uploaded":
                     return
                 uploaded_bytes = response.get("uploaded_bytes")
                 offset = int(uploaded_bytes) if uploaded_bytes is not None else offset + len(chunk)
+                chunk_attempt = 0
         self.complete_upload(artifact_id)
 
     def upload_status(self, artifact_id: str) -> Dict[str, Any]:

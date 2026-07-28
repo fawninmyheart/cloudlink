@@ -17,7 +17,9 @@ class WorkerConfig:
     api_retries: int
     api_retry_base_seconds: float
     api_retry_max_seconds: float
+    result_report_timeout_seconds: float
     artifact_upload_retries: int
+    artifact_upload_timeout_seconds: float
     artifact_retry_base_seconds: float
     artifact_retry_max_seconds: float
     poll_interval_seconds: float
@@ -137,10 +139,20 @@ def load_worker_config(env: Optional[Mapping[str, str]] = None) -> WorkerConfig:
             "WORKER_API_RETRY_MAX_SECONDS",
             "15",
         ),
+        result_report_timeout_seconds=_positive_float(
+            source,
+            "CLOUDLINK_RESULT_REPORT_TIMEOUT_SECONDS",
+            "300",
+        ),
         artifact_upload_retries=_non_negative_int(
             source,
             "CLOUDLINK_ARTIFACT_UPLOAD_RETRIES",
             "6",
+        ),
+        artifact_upload_timeout_seconds=_positive_float(
+            source,
+            "CLOUDLINK_ARTIFACT_UPLOAD_TIMEOUT_SECONDS",
+            "300",
         ),
         artifact_retry_base_seconds=_positive_float(
             source,

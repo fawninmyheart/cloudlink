@@ -303,6 +303,53 @@ def test_worker_uploads_artifact_in_resumable_chunks(monkeypatch, tmp_path):
     assert download.content == content
 
 
+def test_three_mib_artifact_round_trip_matches_sha256(monkeypatch, tmp_path):
+    client = make_client(monkeypatch, tmp_path)
+    register_worker(client)
+    task = claim_script_task(client)
+    content = bytes(range(256)) * (3 * 1024 * 1024 // 256)
+    digest = hashlib.sha256(content).hexdigest()
+
+    create = client.post(
+        f"/api/worker/tasks/{task['id']}/artifacts",
+        headers=worker_headers(),
+        json={
+            "worker_id": "worker-a",
+            "lease_id": task["lease_id"],
+            "relative_path": "three-mib.bin",
+            "content_type": "application/octet-stream",
+            "size_bytes": len(content),
+            "sha256": digest,
+            "required": True,
+        },
+    )
+    assert create.status_code == 200
+    artifact_id = create.json()["id"]
+
+    chunk_size = 256 * 1024
+    for offset in range(0, len(content), chunk_size):
+        upload = client.put(
+            f"/api/worker/tasks/{task['id']}/artifacts/{artifact_id}/chunks/{offset}",
+            headers={**worker_headers(), "Content-Type": "application/octet-stream"},
+            content=content[offset : offset + chunk_size],
+        )
+        assert upload.status_code == 200
+
+    complete = client.post(
+        f"/api/worker/tasks/{task['id']}/artifacts/{artifact_id}/complete",
+        headers=worker_headers(),
+    )
+    assert complete.status_code == 200
+
+    download = client.get(
+        f"/api/internal/tasks/{task['id']}/artifacts/{artifact_id}/download",
+        headers=internal_headers(),
+    )
+    assert download.status_code == 200
+    assert len(download.content) == 3 * 1024 * 1024
+    assert hashlib.sha256(download.content).hexdigest() == digest
+
+
 def test_worker_completes_empty_artifact_upload(monkeypatch, tmp_path):
     client = make_client(monkeypatch, tmp_path)
     register_worker(client)

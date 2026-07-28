@@ -133,8 +133,8 @@ TASK_LOCK_SECONDS=1800
 CLOUDLINK_MAX_PENDING_TASKS=10
 CLOUDLINK_QUEUE_TIMEOUT_SECONDS=21600
 CLOUDLINK_STARVATION_PROTECTION_SECONDS=900
-CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.27.1
-CLOUDLINK_MINIMUM_GPU_WORKER_VERSION=2026.07.27.1
+CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.29.1
+CLOUDLINK_MINIMUM_GPU_WORKER_VERSION=2026.07.29.1
 WORKER_ONLINE_SECONDS=180
 TASK_ALLOWED_TYPES=echo_test,generate_daily_report,script_job
 WORKER_INSTALL_INVITE_TTL_MINUTES=30
@@ -184,6 +184,10 @@ server {
     }
 
     location / {
+        client_body_timeout 300s;
+        proxy_request_buffering off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
         proxy_pass http://127.0.0.1:8010;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -246,8 +250,8 @@ export CLOUDLINK_CODEX_TOKEN="$(python3 -c 'import secrets; print(secrets.token_
 export ADMIN_USERNAME=admin
 export ADMIN_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
 export TASK_LOCK_SECONDS=1800
-export CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.27.1
-export CLOUDLINK_MINIMUM_GPU_WORKER_VERSION=2026.07.27.1
+export CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.29.1
+export CLOUDLINK_MINIMUM_GPU_WORKER_VERSION=2026.07.29.1
 export WORKER_ONLINE_SECONDS=180
 export TASK_ALLOWED_TYPES=echo_test,generate_daily_report,script_job
 export CLOUDLINK_DATA_ROOT=./data

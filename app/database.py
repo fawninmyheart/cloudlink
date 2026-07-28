@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     locked_by TEXT,
     locked_until TEXT,
     lease_id TEXT,
+    completion_lease_id TEXT,
+    result_sha256 TEXT,
     resource_request TEXT,
     resource_reservation TEXT,
     resource_rejection TEXT,
@@ -302,6 +304,8 @@ def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
         ensure_column(conn, "tasks", "lease_id", "lease_id TEXT")
+        ensure_column(conn, "tasks", "completion_lease_id", "completion_lease_id TEXT")
+        ensure_column(conn, "tasks", "result_sha256", "result_sha256 TEXT")
         ensure_column(conn, "tasks", "title", "title TEXT NOT NULL DEFAULT ''")
         ensure_column(
             conn,

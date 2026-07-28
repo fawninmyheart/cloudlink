@@ -62,6 +62,16 @@ def json_bytes(value: Dict[str, Any]) -> int:
     return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
 
 
+def result_sha256(value: Dict[str, Any]) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def validate_json_size(value: Dict[str, Any], settings: Settings) -> None:
     if json_bytes(value) > settings.max_json_bytes:
         raise PayloadTooLarge("JSON field is too large")
@@ -1622,12 +1632,28 @@ def report_success(
     task_id: str,
     worker_id: str,
     lease_id: str,
+    reported_result_sha256: Optional[str],
     result: Dict[str, Any],
     logs: Optional[str],
 ) -> Dict[str, Any]:
     settings = get_settings()
     validate_json_size(result, settings)
     validate_text_size(logs, settings)
+    actual_result_sha256 = result_sha256(result)
+    if reported_result_sha256 and not hmac.compare_digest(
+        reported_result_sha256,
+        actual_result_sha256,
+    ):
+        raise TaskConflict("Result SHA-256 does not match payload")
+
+    existing = get_task(conn, task_id)
+    if existing["status"] == "success":
+        if (
+            existing.get("completion_lease_id") == lease_id
+            and existing.get("result_sha256") == actual_result_sha256
+        ):
+            return existing
+        raise TaskConflict("Task already succeeded with a different completion")
     task = _assert_owned_running_task(conn, task_id, worker_id, lease_id)
 
     now = utc_now()
@@ -1658,6 +1684,8 @@ def report_success(
         UPDATE tasks
         SET status = 'success',
             result = ?,
+            result_sha256 = ?,
+            completion_lease_id = ?,
             logs = ?,
             error = NULL,
             error_code = NULL,
@@ -1667,7 +1695,15 @@ def report_success(
             lease_id = NULL
         WHERE id = ?
         """,
-        (json.dumps(result, ensure_ascii=False), logs, now, now, task_id),
+        (
+            json.dumps(result, ensure_ascii=False),
+            actual_result_sha256,
+            lease_id,
+            logs,
+            now,
+            now,
+            task_id,
+        ),
     )
     set_task_artifact_expiry(conn, task_id, now)
     return get_task(conn, task_id)
