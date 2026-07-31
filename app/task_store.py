@@ -23,7 +23,9 @@ WORKER_SECRET_SCHEME = "sha256"
 
 
 class TaskConflict(Exception):
-    pass
+    def __init__(self, message: str, *, code: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class TaskNotFound(Exception):
@@ -526,7 +528,15 @@ def task_summary(
 ) -> Dict[str, int]:
     summary = {
         status: 0
-        for status in ["pending", "running", "success", "failed", "timeout", "cancelled"]
+        for status in [
+            "pending",
+            "running",
+            "disconnected",
+            "success",
+            "failed",
+            "timeout",
+            "cancelled",
+        ]
     }
     where = ""
     params: List[Any] = []
@@ -807,18 +817,89 @@ def expire_locked_tasks(conn: sqlite3.Connection, now: str) -> None:
     conn.execute(
         """
         UPDATE tasks
-        SET status = 'timeout',
-            error_code = 'worker_lost',
-            error = 'Worker lease expired; task was not automatically retried',
+        SET status = 'disconnected',
+            error_code = 'worker_disconnected',
+            error = 'Worker lease expired; waiting for the original execution to reconnect',
             updated_at = ?,
-            finished_at = ?,
             locked_until = NULL
         WHERE status = 'running'
+          AND type = 'script_job'
+          AND locked_until IS NOT NULL
+          AND locked_until <= ?
+        """,
+        (now, now),
+    )
+    conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'timeout',
+            error_code = 'worker_lost',
+            error = 'Worker lease expired while task was running; task was not automatically retried',
+            finished_at = ?,
+            updated_at = ?,
+            locked_until = NULL,
+            resource_reservation = NULL
+        WHERE status = 'running'
+          AND type != 'script_job'
           AND locked_until IS NOT NULL
           AND locked_until <= ?
         """,
         (now, now, now),
     )
+
+
+def resume_task_execution(
+    conn: sqlite3.Connection,
+    task_id: str,
+    worker_id: str,
+    lease_id: str,
+) -> Dict[str, Any]:
+    task = get_task(conn, task_id)
+    if task["type"] != "script_job":
+        raise TaskConflict(
+            "Only script_job execution can be resumed",
+            code="execution_resume_unsupported",
+        )
+    if task["status"] in TERMINAL_STATUSES:
+        raise TaskConflict("Task is already finished", code="task_finished")
+    if task.get("locked_by") != worker_id:
+        raise TaskConflict(
+            "Task is not locked by this worker",
+            code="task_worker_mismatch",
+        )
+    if task.get("lease_id") != lease_id:
+        raise TaskConflict("Task lease does not match", code="task_lease_mismatch")
+    if task["status"] not in {"running", "disconnected"}:
+        raise TaskConflict(
+            "Task execution cannot be resumed",
+            code="execution_resume_denied",
+        )
+
+    now = utc_now()
+    locked_until = (
+        parse_utc(now) + timedelta(seconds=get_settings().task_lock_seconds)
+    ).isoformat()
+    conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'running',
+            error = NULL,
+            error_code = NULL,
+            updated_at = ?,
+            finished_at = NULL,
+            locked_until = ?
+        WHERE id = ?
+        """,
+        (now, locked_until, task_id),
+    )
+    task = get_task(conn, task_id)
+    return {
+        "status": "ok",
+        "lease_id": lease_id,
+        "locked_until": locked_until,
+        "cancel_requested": bool(task.get("cancel_requested_at")),
+        "cancel_reason": task.get("cancel_reason") or "",
+    }
 
 
 def resume_task_delivery(
@@ -843,6 +924,10 @@ def resume_task_delivery(
         task["status"] == "running"
         and task.get("lease_id") == previous_lease_id
     )
+    same_disconnected_lease = (
+        task["status"] == "disconnected"
+        and task.get("lease_id") == previous_lease_id
+    )
     artifact_lease = conn.execute(
         """
         SELECT 1 FROM task_artifacts
@@ -858,7 +943,11 @@ def resume_task_delivery(
             or artifact_lease is not None
         )
     )
-    if not same_running_lease and not preserved_terminal_lease:
+    if (
+        not same_running_lease
+        and not same_disconnected_lease
+        and not preserved_terminal_lease
+    ):
         raise TaskConflict("Task delivery lease cannot be resumed")
 
     now = utc_now()
@@ -947,6 +1036,7 @@ def queue_status(conn: sqlite3.Connection) -> Dict[str, Any]:
     return {
         "pending_count": int(counts.get("pending", 0)),
         "running_count": int(counts.get("running", 0)),
+        "disconnected_count": int(counts.get("disconnected", 0)),
         "max_pending": settings.max_pending_tasks,
         "queue_timeout_seconds": settings.queue_timeout_seconds,
         "oldest_pending_age_seconds": oldest_age,
@@ -1097,7 +1187,7 @@ def subtract_running_reservations(
         """
         SELECT resource_reservation
         FROM tasks
-        WHERE status = 'running'
+        WHERE status IN ('running', 'disconnected')
           AND locked_by = ?
           AND resource_reservation IS NOT NULL
           AND (locked_until IS NULL OR locked_until > ?)
@@ -1151,7 +1241,7 @@ def running_task_count(conn: sqlite3.Connection, worker_id: str) -> int:
         """
         SELECT COUNT(*) AS count
         FROM tasks
-        WHERE status = 'running'
+        WHERE status IN ('running', 'disconnected')
           AND locked_by = ?
           AND (locked_until IS NULL OR locked_until > ?)
         """,
@@ -1177,7 +1267,7 @@ def running_resource_totals(
         """
         SELECT resource_reservation
         FROM tasks
-        WHERE status = 'running'
+        WHERE status IN ('running', 'disconnected')
           AND locked_by = ?
           AND resource_reservation IS NOT NULL
           AND (locked_until IS NULL OR locked_until > ?)
@@ -1621,13 +1711,21 @@ def _assert_owned_running_task(
 ) -> Dict[str, Any]:
     task = get_task(conn, task_id)
     if task["status"] in TERMINAL_STATUSES:
-        raise TaskConflict("Task is already finished")
+        raise TaskConflict("Task is already finished", code="task_finished")
+    if task["status"] == "disconnected":
+        raise TaskConflict(
+            "Task execution is waiting for reconnect",
+            code="execution_disconnected",
+        )
     if task["status"] != "running":
-        raise TaskConflict("Task is not running")
+        raise TaskConflict("Task is not running", code="task_not_running")
     if task["locked_by"] != worker_id:
-        raise TaskConflict("Task is not locked by this worker")
+        raise TaskConflict(
+            "Task is not locked by this worker",
+            code="task_worker_mismatch",
+        )
     if task["lease_id"] != lease_id:
-        raise TaskConflict("Task lease does not match")
+        raise TaskConflict("Task lease does not match", code="task_lease_mismatch")
     return task
 
 
@@ -1669,7 +1767,7 @@ def cancel_task(
     task = get_task_for_submitter(conn, task_id, submitter_id)
     if task["status"] in TERMINAL_STATUSES:
         return task
-    if task["status"] == "running":
+    if task["status"] in {"running", "disconnected"}:
         message = reason.strip() if reason.strip() else "Task cancelled by submitter"
         validate_text_size(message, settings)
         conn.execute(

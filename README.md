@@ -133,8 +133,8 @@ TASK_LOCK_SECONDS=1800
 CLOUDLINK_MAX_PENDING_TASKS=10
 CLOUDLINK_QUEUE_TIMEOUT_SECONDS=21600
 CLOUDLINK_STARVATION_PROTECTION_SECONDS=900
-CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.31.1
-CLOUDLINK_MINIMUM_GPU_WORKER_VERSION=2026.07.31.1
+CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.31.2
+CLOUDLINK_MINIMUM_GPU_WORKER_VERSION=2026.07.31.2
 WORKER_ONLINE_SECONDS=180
 TASK_ALLOWED_TYPES=echo_test,generate_daily_report,script_job
 WORKER_INSTALL_INVITE_TTL_MINUTES=30
@@ -250,8 +250,8 @@ export CLOUDLINK_CODEX_TOKEN="$(python3 -c 'import secrets; print(secrets.token_
 export ADMIN_USERNAME=admin
 export ADMIN_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
 export TASK_LOCK_SECONDS=1800
-export CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.31.1
-export CLOUDLINK_MINIMUM_GPU_WORKER_VERSION=2026.07.31.1
+export CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.31.2
+export CLOUDLINK_MINIMUM_GPU_WORKER_VERSION=2026.07.31.2
 export WORKER_ONLINE_SECONDS=180
 export TASK_ALLOWED_TYPES=echo_test,generate_daily_report,script_job
 export CLOUDLINK_DATA_ROOT=./data
@@ -319,7 +319,7 @@ Cloudlink protects local workers from unbounded task buildup:
 - `CLOUDLINK_QUEUE_TIMEOUT_SECONDS` expires tasks that wait too long before being claimed. The default is `21600` seconds.
 - `CLOUDLINK_STARVATION_PROTECTION_SECONDS` helps older large tasks avoid being starved by a constant stream of smaller tasks.
 - Script jobs use `--timeout` for execution time after a worker starts the Python script. This is separate from queue wait time. Explicit timeouts may be as long as one year by default; oversized values are rejected rather than silently shortened.
-- Running workers renew task leases every five seconds. A lost lease ends as `worker_lost` and is never automatically reclaimed as another attempt.
+- Running workers renew task leases every five seconds. An expired script lease enters `disconnected` and remains assigned to the original worker and lease. The same execution resumes after connectivity returns; Cloudlink never gives it to another worker.
 - Cancelling a running task requests worker-side process-tree termination. Resources remain reserved until the worker confirms `cancelled`.
 - Workers whose `cloudlink_version` is below `CLOUDLINK_MINIMUM_WORKER_VERSION` are marked as needing an update and cannot claim new tasks.
 
@@ -693,8 +693,9 @@ sudo systemctl restart cloudlink
 - If the worker process is still running but the dashboard shows offline, check for repeated network timeouts. The worker sends heartbeats in a background thread; `WORKER_API_TIMEOUT_SECONDS`, `WORKER_API_RETRIES`, `WORKER_API_RETRY_BASE_SECONDS`, `WORKER_API_RETRY_MAX_SECONDS`, `WORKER_HEARTBEAT_SECONDS`, and server `WORKER_ONLINE_SECONDS` control how quickly the dashboard reacts to public HTTPS interruptions.
 - If no task is claimed, remember that the worker now tries task claim first and only checks dataset delete requests on `WORKER_MAINTENANCE_INTERVAL_SECONDS`, so a dataset-maintenance timeout should no longer block every idle poll.
 - If a legacy start script fails while fetching `WORKER_SECRET` over SSH, rerun once when SSH is reachable. The start script caches the secret at `CLOUDLINK_WORKER_SECRET_FILE`, and later starts use the local cache instead of SSH. Dashboard-installed workers do not need SSH access to fetch the worker credential.
-- Query the task and check whether `status` is `pending`, `running`, or `timeout`.
-- If a worker crashes while running a task, its lease expires after `TASK_LOCK_SECONDS` and the task ends once as `worker_lost`. Cloudlink never automatically reclaims it; inspect the failure before submitting a new task.
+- Query the task and check whether `status` is `pending`, `running`, `disconnected`, or a terminal state.
+- If a script worker is unreachable for longer than `TASK_LOCK_SECONDS`, the task enters `disconnected`. The original worker resumes the same execution lease after reconnecting; another worker cannot claim it. An operator cancellation remains pending and is delivered when the worker reconnects.
+- A worker process or host restart can still terminate an in-memory child process. Cloudlink preserves completed result delivery across worker restarts, but resuming a partially executed process after an operating-system restart requires an application-level checkpoint.
 - Check worker logs for network/API errors.
 
 ## Add A New Task Type

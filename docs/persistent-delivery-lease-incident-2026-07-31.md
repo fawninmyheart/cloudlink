@@ -5,6 +5,11 @@
 本地仓库：`/home/ubuntu/research/cloudlink-source`  
 上游仓库：`https://github.com/fawninmyheart/cloudlink`
 
+> 状态：已由正式版本 `2026.07.31.2` 取代。临时入口
+> `scripts/deploy_local_delivery_fix.sh` 已移除，不应再次用于部署。
+> 正式机制和操作边界见
+> `docs/offline-execution-recovery-2026-07-31.md`。
+
 ## 1. 摘要
 
 Cloudlink `2026.07.30.1` 已经能够在脚本计算完成后把待交付结果持久化到

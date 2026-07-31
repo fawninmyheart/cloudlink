@@ -51,6 +51,26 @@ DELIVERY_LEASE_CONFLICT_DETAILS = {
     "Task is not locked by this worker",
     "Task lease does not match",
 }
+DELIVERY_LEASE_CONFLICT_CODES = {
+    "execution_disconnected",
+    "task_finished",
+    "task_not_running",
+    "task_worker_mismatch",
+    "task_lease_mismatch",
+}
+
+
+def api_error_detail(error: ApiRequestError) -> Tuple[Optional[str], Optional[str]]:
+    try:
+        payload = json.loads(error.response_body or "{}")
+    except json.JSONDecodeError:
+        return None, None
+    detail = payload.get("detail")
+    if isinstance(detail, dict):
+        return detail.get("code"), detail.get("message")
+    if isinstance(detail, str):
+        return None, detail
+    return None, None
 
 
 def delivery_lease_was_lost(error: BaseException) -> bool:
@@ -59,14 +79,21 @@ def delivery_lease_was_lost(error: BaseException) -> bool:
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         if isinstance(current, ApiRequestError) and current.status_code == 409:
-            try:
-                payload = json.loads(current.response_body or "{}")
-            except json.JSONDecodeError:
-                payload = {}
-            if payload.get("detail") in DELIVERY_LEASE_CONFLICT_DETAILS:
+            code, message = api_error_detail(current)
+            if (
+                code in DELIVERY_LEASE_CONFLICT_CODES
+                or message in DELIVERY_LEASE_CONFLICT_DETAILS
+            ):
                 return True
         current = current.__cause__ or current.__context__
     return False
+
+
+def execution_lease_was_disconnected(error: ApiRequestError) -> bool:
+    if error.status_code != 409:
+        return False
+    code, _message = api_error_detail(error)
+    return code == "execution_disconnected"
 
 
 class CloudWorker:
@@ -438,6 +465,19 @@ class CloudWorker:
         tmp.replace(path)
         return item
 
+    def resume_execution_lease(
+        self,
+        task_id: str,
+        lease_id: str,
+    ) -> Dict[str, Any]:
+        return self.post_json(
+            f"/api/worker/tasks/{task_id}/execution/resume",
+            {
+                "worker_id": self.worker_id,
+                "lease_id": lease_id,
+            },
+        )
+
     def deliver_preserved_result(self, item: Dict[str, Any]) -> None:
         task_id = item["task_id"]
         outbox_path = self.delivery_outbox_dir() / f"{task_id}.json"
@@ -680,6 +720,23 @@ class CloudWorker:
                     f"success report pending for task {task_id}; "
                     f"result preserved in {outbox_path}; will retry: {exc}"
                 )
+                if execution_lease_was_disconnected(exc):
+                    try:
+                        self.resume_execution_lease(task_id, lease_id)
+                    except ApiRequestError as resume_exc:
+                        if resume_exc.status_code == 409:
+                            return
+                        self.log(
+                            f"success report execution recovery failed for "
+                            f"{task_id}: {resume_exc}; will retry"
+                        )
+                    except Exception as resume_exc:
+                        self.log(
+                            f"success report execution recovery error for "
+                            f"{task_id}: {resume_exc}; will retry"
+                        )
+                    else:
+                        continue
                 if exc.status_code is not None and exc.status_code < 500:
                     return
             except Exception as exc:
@@ -703,12 +760,23 @@ class CloudWorker:
         for path in sorted(outbox.glob("*.json")):
             try:
                 item = json.loads(path.read_text(encoding="utf-8"))
-                self.report_success(
-                    item["task_id"],
-                    item["lease_id"],
-                    item["result"],
-                    item.get("logs") or "",
-                )
+                try:
+                    self.report_success(
+                        item["task_id"],
+                        item["lease_id"],
+                        item["result"],
+                        item.get("logs") or "",
+                    )
+                except ApiRequestError as exc:
+                    if not execution_lease_was_disconnected(exc):
+                        raise
+                    self.resume_execution_lease(item["task_id"], item["lease_id"])
+                    self.report_success(
+                        item["task_id"],
+                        item["lease_id"],
+                        item["result"],
+                        item.get("logs") or "",
+                    )
                 path.unlink(missing_ok=True)
                 self.log(f"replayed preserved success for task {item['task_id']}")
             except Exception as exc:
@@ -732,6 +800,34 @@ class CloudWorker:
         if error_code:
             body["error_code"] = error_code
         self.post_json(f"/api/worker/tasks/{task_id}/failed", body)
+
+    def report_failed_after_reconnect(
+        self,
+        task_id: str,
+        lease_id: str,
+        error: str,
+        logs: str,
+        error_code: Optional[str] = None,
+    ) -> None:
+        try:
+            self.report_failed(
+                task_id,
+                lease_id,
+                error,
+                logs,
+                error_code=error_code,
+            )
+        except ApiRequestError as exc:
+            if not execution_lease_was_disconnected(exc):
+                raise
+            self.resume_execution_lease(task_id, lease_id)
+            self.report_failed(
+                task_id,
+                lease_id,
+                error,
+                logs,
+                error_code=error_code,
+            )
 
     def run_task(
         self,
@@ -799,6 +895,34 @@ class CloudWorker:
                 if response.get("cancel_requested"):
                     cancel_event.set()
             except ApiRequestError as exc:
+                if execution_lease_was_disconnected(exc):
+                    try:
+                        response = self.resume_execution_lease(task_id, lease_id)
+                    except ApiRequestError as resume_exc:
+                        if resume_exc.status_code == 409:
+                            self.log(
+                                f"task {task_id} execution recovery was denied; "
+                                "terminating task"
+                            )
+                            cancel_event.set()
+                            return
+                        self.log(
+                            f"task {task_id} execution recovery failed: "
+                            f"{resume_exc}; will retry"
+                        )
+                        continue
+                    except Exception as resume_exc:
+                        self.log(
+                            f"task {task_id} execution recovery error: "
+                            f"{resume_exc}; will retry"
+                        )
+                        continue
+                    self.log(
+                        f"task {task_id} resumed after worker reconnect"
+                    )
+                    if response.get("cancel_requested"):
+                        cancel_event.set()
+                    continue
                 if exc.status_code == 409:
                     self.log(f"task {task_id} lease was revoked; terminating task")
                     cancel_event.set()
@@ -884,7 +1008,7 @@ class CloudWorker:
             logs = traceback.format_exc()
             self.log(f"task {task_id} cancelled: {exc}")
             try:
-                self.report_failed(
+                self.report_failed_after_reconnect(
                     task_id,
                     lease_id,
                     str(exc),
@@ -897,7 +1021,7 @@ class CloudWorker:
             logs = traceback.format_exc()
             self.log(f"task {task_id} execution timed out: {exc}")
             try:
-                self.report_failed(
+                self.report_failed_after_reconnect(
                     task_id,
                     lease_id,
                     str(exc),
@@ -910,7 +1034,7 @@ class CloudWorker:
             logs = traceback.format_exc()
             self.log(f"task {task_id} failed: {exc}")
             try:
-                self.report_failed(
+                self.report_failed_after_reconnect(
                     task_id,
                     lease_id,
                     str(exc),

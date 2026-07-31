@@ -562,6 +562,98 @@ def test_success_report_timeout_preserves_and_retries_result(monkeypatch, tmp_pa
     assert not (worker.completion_outbox_dir() / "task-result.json").exists()
 
 
+def test_replayed_success_resumes_disconnected_execution(monkeypatch, tmp_path):
+    configure_worker_env(monkeypatch)
+    monkeypatch.setenv("CLOUDLINK_HOME", str(tmp_path / "cloudlink-home"))
+    worker = CloudWorker()
+    outbox_path = worker.persist_completion(
+        "task-result",
+        "lease-result",
+        {"prediction": [1, 2, 3]},
+        "done",
+    )
+    reports = []
+    resumes = []
+
+    def report(task_id, lease_id, result, logs):
+        reports.append((task_id, lease_id, result, logs))
+        if len(reports) == 1:
+            raise ApiRequestError(
+                "execution disconnected",
+                method="POST",
+                path=f"/api/worker/tasks/{task_id}/success",
+                attempt=1,
+                elapsed_seconds=0.1,
+                status_code=409,
+                response_body=json.dumps(
+                    {
+                        "detail": {
+                            "code": "execution_disconnected",
+                            "message": "execution is waiting for reconnect",
+                        }
+                    }
+                ),
+            )
+
+    monkeypatch.setattr(worker, "report_success", report)
+    monkeypatch.setattr(
+        worker,
+        "resume_execution_lease",
+        lambda task_id, lease_id: resumes.append((task_id, lease_id)) or {},
+    )
+
+    worker.replay_completion_outbox()
+
+    assert len(reports) == 2
+    assert resumes == [("task-result", "lease-result")]
+    assert not outbox_path.exists()
+
+
+def test_failure_report_resumes_disconnected_execution(monkeypatch):
+    configure_worker_env(monkeypatch)
+    worker = CloudWorker()
+    reports = []
+    resumes = []
+
+    def report(task_id, lease_id, error, logs, error_code=None):
+        reports.append((task_id, lease_id, error, logs, error_code))
+        if len(reports) == 1:
+            raise ApiRequestError(
+                "execution disconnected",
+                method="POST",
+                path=f"/api/worker/tasks/{task_id}/failed",
+                attempt=1,
+                elapsed_seconds=0.1,
+                status_code=409,
+                response_body=json.dumps(
+                    {
+                        "detail": {
+                            "code": "execution_disconnected",
+                            "message": "execution is waiting for reconnect",
+                        }
+                    }
+                ),
+            )
+
+    monkeypatch.setattr(worker, "report_failed", report)
+    monkeypatch.setattr(
+        worker,
+        "resume_execution_lease",
+        lambda task_id, lease_id: resumes.append((task_id, lease_id)) or {},
+    )
+
+    worker.report_failed_after_reconnect(
+        "task-result",
+        "lease-result",
+        "process failed",
+        "traceback",
+        error_code="execution_failed",
+    )
+
+    assert len(reports) == 2
+    assert resumes == [("task-result", "lease-result")]
+
+
 def test_artifact_upload_failure_pauses_delivery_without_reporting_task_failed(
     monkeypatch,
     tmp_path,
@@ -776,6 +868,97 @@ def test_task_lease_loop_delivers_cancel_request(monkeypatch):
         "/api/worker/tasks/task-a/lease",
         {"worker_id": "worker-a", "lease_id": "lease-a"},
     )
+
+
+def test_task_lease_loop_resumes_after_server_marks_execution_disconnected(
+    monkeypatch,
+):
+    configure_worker_env(monkeypatch)
+    monkeypatch.setenv("CLOUDLINK_TASK_LEASE_RENEW_SECONDS", "0.01")
+    worker = CloudWorker()
+    cancel_event = threading.Event()
+    stop_event = threading.Event()
+    calls = []
+
+    def fake_post_json(path, body):
+        calls.append((path, body))
+        if path.endswith("/lease"):
+            raise ApiRequestError(
+                "execution disconnected",
+                method="POST",
+                path=path,
+                attempt=1,
+                elapsed_seconds=0.1,
+                status_code=409,
+                response_body=json.dumps(
+                    {
+                        "detail": {
+                            "code": "execution_disconnected",
+                            "message": "execution is waiting for reconnect",
+                        }
+                    }
+                ),
+            )
+        stop_event.set()
+        return {"cancel_requested": False}
+
+    monkeypatch.setattr(worker, "post_json", fake_post_json)
+    thread = threading.Thread(
+        target=worker.task_lease_loop,
+        args=("task-a", "lease-a", cancel_event, stop_event),
+    )
+    thread.start()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert not cancel_event.is_set()
+    assert calls == [
+        (
+            "/api/worker/tasks/task-a/lease",
+            {"worker_id": "worker-a", "lease_id": "lease-a"},
+        ),
+        (
+            "/api/worker/tasks/task-a/execution/resume",
+            {"worker_id": "worker-a", "lease_id": "lease-a"},
+        ),
+    ]
+
+
+def test_task_lease_loop_stops_when_execution_resume_is_denied(monkeypatch):
+    configure_worker_env(monkeypatch)
+    monkeypatch.setenv("CLOUDLINK_TASK_LEASE_RENEW_SECONDS", "0.01")
+    worker = CloudWorker()
+    cancel_event = threading.Event()
+    stop_event = threading.Event()
+
+    def fake_post_json(path, _body):
+        code = (
+            "execution_disconnected"
+            if path.endswith("/lease")
+            else "task_lease_mismatch"
+        )
+        raise ApiRequestError(
+            code,
+            method="POST",
+            path=path,
+            attempt=1,
+            elapsed_seconds=0.1,
+            status_code=409,
+            response_body=json.dumps(
+                {"detail": {"code": code, "message": code}}
+            ),
+        )
+
+    monkeypatch.setattr(worker, "post_json", fake_post_json)
+    thread = threading.Thread(
+        target=worker.task_lease_loop,
+        args=("task-a", "lease-a", cancel_event, stop_event),
+    )
+    thread.start()
+
+    assert cancel_event.wait(timeout=1)
+    thread.join(timeout=1)
+    assert not thread.is_alive()
 
 
 def test_doctor_uses_safe_claim_probe_and_hides_secret(monkeypatch, capsys):

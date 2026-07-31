@@ -335,7 +335,7 @@ def dashboard_html() -> str:
     }
     .state.success, .state.online, .state.cached, .state.extracted, .state.ok { color: var(--ok); background: var(--ok-bg); }
     .state.running, .state.cancelling, .state.downloading { color: var(--accent); background: var(--accent-soft); }
-    .state.pending, .state.delete_requested { color: var(--warn); background: var(--warn-bg); }
+    .state.pending, .state.disconnected, .state.delete_requested { color: var(--warn); background: var(--warn-bg); }
     .state.failed, .state.timeout, .state.offline, .state.missing, .state.invalid, .state.needs_update, .state.unsupported_platform { color: var(--bad); background: var(--bad-bg); }
     .state.idle, .state.deleted, .state.disabled { color: var(--idle); background: var(--idle-bg); }
     .tags {
@@ -923,6 +923,7 @@ def dashboard_html() -> str:
       ["任务总数", "Total tasks"],
       ["待领取", "Pending"],
       ["执行中", "Running"],
+      ["等待重连", "Waiting for reconnect"],
       ["成功", "Success"],
       ["失败", "Failed"],
       ["超时", "Timeout"],
@@ -1056,6 +1057,7 @@ def dashboard_html() -> str:
     const taskStatusLabels = {
       pending: "待领取",
       running: "执行中",
+      disconnected: "等待重连",
       cancelling: "正在取消",
       success: "成功",
       failed: "失败",
@@ -1428,6 +1430,7 @@ def dashboard_html() -> str:
         ["任务总数", summary.total || 0],
         ["待领取", summary.pending || 0],
         ["执行中", summary.running || 0],
+        ["等待重连", summary.disconnected || 0],
         ["成功", summary.success || 0],
         ["失败", summary.failed || 0],
         ["节点在线", `${onlineWorkers}/${workers.length}`],

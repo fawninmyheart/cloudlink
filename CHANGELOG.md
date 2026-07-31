@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026.07.31.2
+
+### Offline Execution Recovery
+
+- Move expired script execution leases into a nonterminal `disconnected` state
+  while preserving the original worker, lease, and resource reservation.
+- Allow only the original worker and lease to resume execution after network
+  connectivity returns; disconnected work is never reclaimed by another node.
+- Carry cancellation requests across the disconnected interval and terminate
+  only after the original worker receives the request.
+- Recover the execution lease before submitting success, failure, cancellation,
+  or replayed completion reports.
+- Retire the temporary production file-replacement deployment script in favor
+  of the normal versioned deployment path.
+
 ## 2026.07.31.1
 
 ### Resilient Delivery Lease Recovery
