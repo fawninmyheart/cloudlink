@@ -78,6 +78,7 @@ from app.task_store import (
     queue_status,
     register_worker,
     renew_task_lease,
+    resume_task_delivery,
     report_failed,
     report_success,
     task_summary,
@@ -201,6 +202,11 @@ class FailedRequest(BaseModel):
 class TaskLeaseRequest(BaseModel):
     worker_id: str = Field(min_length=1)
     lease_id: str = Field(min_length=1)
+
+
+class ResumeDeliveryRequest(BaseModel):
+    worker_id: str = Field(min_length=1)
+    previous_lease_id: str = Field(min_length=1)
 
 
 class RegisterWorkerRequest(BaseModel):
@@ -1643,6 +1649,28 @@ def api_renew_task_lease(
             task_id,
             body.worker_id,
             body.lease_id,
+        )
+    except Exception as exc:
+        raise map_store_error(exc) from exc
+
+
+@app.post(
+    "/api/worker/tasks/{task_id}/delivery/resume",
+    dependencies=[Depends(require_worker_auth)],
+)
+def api_resume_task_delivery(
+    task_id: str,
+    body: ResumeDeliveryRequest,
+    worker_token: str = Depends(require_worker_auth),
+    conn: Connection = Depends(get_connection),
+) -> Dict[str, Any]:
+    try:
+        get_worker_for_api(conn, body.worker_id, worker_token)
+        return resume_task_delivery(
+            conn,
+            task_id,
+            body.worker_id,
+            body.previous_lease_id,
         )
     except Exception as exc:
         raise map_store_error(exc) from exc

@@ -19,6 +19,7 @@ class ApiRequestError(Exception):
         attempt: int,
         elapsed_seconds: float,
         status_code: Optional[int] = None,
+        response_body: Optional[str] = None,
         original: Optional[BaseException] = None,
     ) -> None:
         super().__init__(message)
@@ -27,6 +28,7 @@ class ApiRequestError(Exception):
         self.attempt = attempt
         self.elapsed_seconds = elapsed_seconds
         self.status_code = status_code
+        self.response_body = response_body
         self.original = original
 
 
@@ -296,6 +298,12 @@ class WorkerApiClient:
                 last_error = exc
                 elapsed = time.perf_counter() - started
                 status_code = exc.code if isinstance(exc, urllib.error.HTTPError) else None
+                response_body = None
+                if isinstance(exc, urllib.error.HTTPError):
+                    try:
+                        response_body = exc.read().decode("utf-8", errors="replace")
+                    except Exception:
+                        response_body = None
                 self.log(
                     f"api error method={method} endpoint={path} attempt={attempt} "
                     f"elapsed={elapsed:.2f}s error_type={type(exc).__name__} "
@@ -313,6 +321,7 @@ class WorkerApiClient:
                         attempt=attempt,
                         elapsed_seconds=total_elapsed,
                         status_code=status_code,
+                        response_body=response_body,
                         original=exc,
                     ) from exc
                 time.sleep(retry_delay_seconds(attempt, retry_base_seconds, retry_max_seconds))

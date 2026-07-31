@@ -181,6 +181,100 @@ def test_worker_artifact_create_is_idempotent_for_same_file(monkeypatch, tmp_pat
     assert retry.json()["relative_path"] == "result.csv"
 
 
+def test_failed_artifact_delivery_can_resume_without_new_task_or_artifact(
+    monkeypatch,
+    tmp_path,
+):
+    client = make_client(monkeypatch, tmp_path)
+    register_worker(client)
+    task = claim_script_task(client)
+    claimed_detail = client.get(
+        f"/api/internal/tasks/{task['id']}",
+        headers=internal_headers(),
+    ).json()
+    assert claimed_detail["resource_reservation"] is not None
+    content = b"abcdefghij"
+    digest = hashlib.sha256(content).hexdigest()
+    create = client.post(
+        f"/api/worker/tasks/{task['id']}/artifacts",
+        headers=worker_headers(),
+        json={
+            "worker_id": "worker-a",
+            "lease_id": task["lease_id"],
+            "relative_path": "large.bin",
+            "size_bytes": len(content),
+            "sha256": digest,
+        },
+    )
+    artifact_id = create.json()["id"]
+    first_chunk = client.put(
+        f"/api/worker/tasks/{task['id']}/artifacts/{artifact_id}/chunks/0",
+        headers={**worker_headers(), "Content-Type": "application/octet-stream"},
+        content=content[:4],
+    )
+    assert first_chunk.json()["uploaded_bytes"] == 4
+    failed = client.post(
+        f"/api/worker/tasks/{task['id']}/failed",
+        headers=worker_headers(),
+        json={
+            "worker_id": "worker-a",
+            "lease_id": task["lease_id"],
+            "error": "network disconnected",
+            "error_code": "artifact_upload_failed",
+        },
+    )
+    assert failed.status_code == 200
+
+    resume = client.post(
+        f"/api/worker/tasks/{task['id']}/delivery/resume",
+        headers=worker_headers(),
+        json={
+            "worker_id": "worker-a",
+            "previous_lease_id": task["lease_id"],
+        },
+    )
+
+    assert resume.status_code == 200
+    new_lease_id = resume.json()["lease_id"]
+    assert new_lease_id != task["lease_id"]
+    task_detail = client.get(
+        f"/api/internal/tasks/{task['id']}",
+        headers=internal_headers(),
+    ).json()
+    assert task_detail["status"] == "running"
+    assert task_detail["resource_reservation"] is None
+    second_resume = client.post(
+        f"/api/worker/tasks/{task['id']}/delivery/resume",
+        headers=worker_headers(),
+        json={
+            "worker_id": "worker-a",
+            "previous_lease_id": new_lease_id,
+        },
+    )
+    assert second_resume.status_code == 200
+    newest_lease_id = second_resume.json()["lease_id"]
+    assert newest_lease_id != new_lease_id
+    retry_create = client.post(
+        f"/api/worker/tasks/{task['id']}/artifacts",
+        headers=worker_headers(),
+        json={
+            "worker_id": "worker-a",
+            "lease_id": newest_lease_id,
+            "relative_path": "large.bin",
+            "size_bytes": len(content),
+            "sha256": digest,
+        },
+    )
+    assert retry_create.status_code == 200
+    assert retry_create.json()["id"] == artifact_id
+    status = client.get(
+        f"/api/worker/tasks/{task['id']}/artifacts/{artifact_id}/upload-status",
+        headers=worker_headers(),
+    )
+    assert status.status_code == 200
+    assert status.json()["uploaded_bytes"] == 4
+
+
 def test_worker_artifact_create_conflicts_for_same_path_different_content(
     monkeypatch,
     tmp_path,

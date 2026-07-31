@@ -4,12 +4,20 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMMAND="start"
 ENV_FILE="$ROOT_DIR/scripts/local_worker.env"
+COMMAND_ARGS=()
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
     start|doctor|print-config)
       COMMAND="$1"
       ENV_FILE="${2:-"$ENV_FILE"}"
+      ;;
+    recover-delivery)
+      COMMAND="$1"
+      ENV_FILE="${2:-"$ENV_FILE"}"
+      if [[ $# -gt 2 ]]; then
+        COMMAND_ARGS=("${@:3}")
+      fi
       ;;
     *)
       COMMAND="start"
@@ -194,5 +202,9 @@ case "$COMMAND" in
     ;;
   print-config)
     exec "$ROOT_DIR/.venv/bin/python" -m worker.local_worker print-config
+    ;;
+  recover-delivery)
+    exec "$ROOT_DIR/.venv/bin/python" -m worker.local_worker \
+      recover-delivery "${COMMAND_ARGS[@]}"
     ;;
 esac

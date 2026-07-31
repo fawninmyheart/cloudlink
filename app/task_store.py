@@ -812,14 +812,92 @@ def expire_locked_tasks(conn: sqlite3.Connection, now: str) -> None:
             error = 'Worker lease expired; task was not automatically retried',
             updated_at = ?,
             finished_at = ?,
-            locked_until = NULL,
-            lease_id = NULL
+            locked_until = NULL
         WHERE status = 'running'
           AND locked_until IS NOT NULL
           AND locked_until <= ?
         """,
         (now, now, now),
     )
+
+
+def resume_task_delivery(
+    conn: sqlite3.Connection,
+    task_id: str,
+    worker_id: str,
+    previous_lease_id: str,
+) -> Dict[str, Any]:
+    task = get_task(conn, task_id)
+    if task["type"] != "script_job":
+        raise TaskConflict("Only script_job delivery can be resumed")
+    if task.get("locked_by") != worker_id:
+        raise TaskConflict("Task is not owned by this worker")
+    recoverable_terminal = (
+        task["status"] == "failed"
+        and task.get("error_code") == "artifact_upload_failed"
+    ) or (
+        task["status"] == "timeout"
+        and task.get("error_code") == "worker_lost"
+    )
+    same_running_lease = (
+        task["status"] == "running"
+        and task.get("lease_id") == previous_lease_id
+    )
+    artifact_lease = conn.execute(
+        """
+        SELECT 1 FROM task_artifacts
+        WHERE task_id = ? AND worker_id = ? AND lease_id = ?
+        LIMIT 1
+        """,
+        (task_id, worker_id, previous_lease_id),
+    ).fetchone()
+    preserved_terminal_lease = (
+        recoverable_terminal
+        and (
+            task.get("lease_id") == previous_lease_id
+            or artifact_lease is not None
+        )
+    )
+    if not same_running_lease and not preserved_terminal_lease:
+        raise TaskConflict("Task delivery lease cannot be resumed")
+
+    now = utc_now()
+    lease_id = str(uuid.uuid4())
+    locked_until = (
+        parse_utc(now) + timedelta(seconds=get_settings().task_lock_seconds)
+    ).isoformat()
+    conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'running',
+            error = NULL,
+            error_code = NULL,
+            logs = NULL,
+            updated_at = ?,
+            finished_at = NULL,
+            locked_until = ?,
+            lease_id = ?,
+            resource_reservation = NULL
+        WHERE id = ?
+        """,
+        (now, locked_until, lease_id, task_id),
+    )
+    conn.execute(
+        """
+        UPDATE task_artifacts
+        SET lease_id = ?,
+            expires_at = NULL,
+            updated_at = ?
+        WHERE task_id = ? AND worker_id = ?
+        """,
+        (lease_id, now, task_id, worker_id),
+    )
+    return {
+        "status": "ok",
+        "lease_id": lease_id,
+        "locked_until": locked_until,
+        "payload": task["payload"],
+    }
 
 
 def expire_pending_tasks(

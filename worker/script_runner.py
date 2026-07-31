@@ -47,6 +47,7 @@ def run_script_job(
     dataset_records: Optional[List[Dict[str, Any]]] = None,
     artifact_uploader: Any = None,
     cancel_event: Optional[threading.Event] = None,
+    execution_completed: Any = None,
 ) -> Tuple[Dict[str, Any], str]:
     runtime = normalize_runtime(payload.get("runtime", "python-auto"))
     script = payload.get("script")
@@ -87,6 +88,11 @@ def run_script_job(
     stdout = trim_text(completed.stdout)
     stderr = trim_text(completed.stderr)
     logs = build_logs(command, completed.returncode, stdout, stderr)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"script_job failed with exit code {completed.returncode}: {stderr[-1000:]}"
+        )
+
     artifact_manifest = read_artifact_manifest(output_dir)
     if artifact_manifest and artifact_uploader and hasattr(artifact_uploader, "with_manifest"):
         artifact_uploader = artifact_uploader.with_manifest(artifact_manifest)
@@ -98,15 +104,26 @@ def run_script_job(
         "job_dir": str(job_dir),
         "stdout": stdout,
         "stderr": stderr,
-        "output_files": list_output_files(output_dir, artifact_uploader),
         "datasets": dataset_records or [],
     }
-
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"script_job failed with exit code {completed.returncode}: {stderr[-1000:]}"
-        )
+    if execution_completed is not None:
+        execution_completed(result, logs, output_dir, artifact_manifest)
+    result["output_files"] = list_output_files(output_dir, artifact_uploader)
     return result, logs
+
+
+def resume_script_job_result(
+    base_result: Dict[str, Any],
+    output_dir: Path,
+    artifact_uploader: Any,
+    artifact_manifest: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    uploader = artifact_uploader
+    if artifact_manifest and hasattr(uploader, "with_manifest"):
+        uploader = uploader.with_manifest(artifact_manifest)
+    result = dict(base_result)
+    result["output_files"] = list_output_files(output_dir, uploader)
+    return result
 
 
 def normalize_runtime(value: Any) -> str:

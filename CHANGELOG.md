@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026.07.31.1
+
+### Resilient Delivery Lease Recovery
+
+- Keep persistent artifact delivery threads separate from script execution
+  concurrency so a delayed delivery cannot occupy the worker's compute slot.
+- Preserve worker API error response details and detect task-lease conflicts
+  without treating unrelated artifact conflicts as expired leases.
+- Reacquire a delivery-only lease when a long network outage outlives the
+  current lease, then continue artifact upload from server-confirmed state.
+
+## 2026.07.30.1
+
+### Persistent Artifact Delivery
+
+- Persist completed script metadata and output locations before the first
+  artifact upload begins.
+- Keep transient artifact delivery failures pending with capped reconnect
+  backoff instead of reporting the completed computation as failed.
+- Replay pending deliveries after worker restart and resume each artifact from
+  the server-confirmed byte offset.
+- Added a worker-authenticated delivery lease recovery path that cannot revive
+  successful, cancelled, or execution-failed tasks.
+- Added `recover-delivery` for uploading an intact historical job directory
+  without rerunning its script.
+- Raised both CPU and GPU minimum worker versions to `2026.07.30.1`.
+
 ## 2026.07.29.1
 
 ### Reliable Result Delivery

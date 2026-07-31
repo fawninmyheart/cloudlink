@@ -4,6 +4,7 @@ from pathlib import Path
 
 import worker.local_worker as local_worker_module
 from worker.api_client import ApiRequestError
+from worker.artifact_manager import ArtifactUploadFailed
 from worker.config import WorkerConfig
 from worker.gpu_runtime import GpuRuntimeValidationTimeout
 from worker.local_worker import CloudWorker
@@ -559,6 +560,193 @@ def test_success_report_timeout_preserves_and_retries_result(monkeypatch, tmp_pa
     assert len(calls) == 2
     assert reported_failed == []
     assert not (worker.completion_outbox_dir() / "task-result.json").exists()
+
+
+def test_artifact_upload_failure_pauses_delivery_without_reporting_task_failed(
+    monkeypatch,
+    tmp_path,
+):
+    configure_worker_env(monkeypatch)
+    monkeypatch.setenv("CLOUDLINK_HOME", str(tmp_path / "cloudlink-home"))
+    worker = CloudWorker()
+    task = {
+        "id": "task-delivery",
+        "type": "script_job",
+        "lease_id": "lease-delivery",
+        "payload": {"script": "print('ok')"},
+    }
+    output_dir = tmp_path / "job" / "outputs"
+    output_dir.mkdir(parents=True)
+    worker.persist_delivery(
+        task,
+        {
+            "worker_id": "worker-a",
+            "runtime": "python-auto",
+            "exit_code": 0,
+            "job_dir": str(output_dir.parent),
+            "stdout": "ok\n",
+            "stderr": "",
+            "datasets": [],
+        },
+        "done",
+        output_dir,
+        {},
+    )
+    reported_failed = []
+    resumed = []
+
+    monkeypatch.setattr(
+        worker,
+        "run_task",
+        lambda _task, _cancel_event: (_ for _ in ()).throw(
+            ArtifactUploadFailed("offline")
+        ),
+    )
+    monkeypatch.setattr(
+        worker,
+        "deliver_preserved_result",
+        lambda item: resumed.append(item),
+    )
+    monkeypatch.setattr(
+        worker,
+        "report_failed",
+        lambda *args, **kwargs: reported_failed.append((args, kwargs)),
+    )
+
+    worker.run_and_report_task(task)
+
+    assert len(resumed) == 1
+    assert resumed[0]["task_id"] == "task-delivery"
+    assert reported_failed == []
+
+
+def test_delivery_replay_does_not_consume_execution_slot(monkeypatch, tmp_path):
+    configure_worker_env(monkeypatch)
+    monkeypatch.setenv("CLOUDLINK_HOME", str(tmp_path / "cloudlink-home"))
+    worker = CloudWorker()
+    outbox = worker.delivery_outbox_dir()
+    outbox.mkdir(parents=True)
+    path = outbox / "task-delivery.json"
+    path.write_text(
+        json.dumps(
+            {
+                "task_id": "task-delivery",
+                "lease_id": "lease-old",
+                "base_result": {},
+                "logs": "",
+                "output_dir": str(tmp_path / "outputs"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    delivery_started = threading.Event()
+    release_delivery = threading.Event()
+
+    monkeypatch.setattr(worker, "resume_delivery_lease", lambda item: item)
+    monkeypatch.setattr(
+        worker,
+        "task_lease_loop",
+        lambda _task_id, _lease_id, _cancel_event, stop_event: stop_event.wait(),
+    )
+
+    def wait_for_release(_item):
+        delivery_started.set()
+        assert release_delivery.wait(timeout=1)
+
+    monkeypatch.setattr(worker, "deliver_preserved_result", wait_for_release)
+
+    worker.replay_delivery_outbox()
+
+    assert delivery_started.wait(timeout=1)
+    assert worker.active_task_count() == 0
+    assert list(worker.delivery_threads) == ["task-delivery"]
+
+    release_delivery.set()
+    worker.join_delivery_threads(timeout=1)
+    assert worker.delivery_threads == {}
+
+
+def test_delivery_replay_reacquires_lease_after_artifact_lease_conflict(
+    monkeypatch,
+    tmp_path,
+):
+    configure_worker_env(monkeypatch)
+    monkeypatch.setenv("CLOUDLINK_HOME", str(tmp_path / "cloudlink-home"))
+    monkeypatch.setenv("CLOUDLINK_ARTIFACT_RETRY_BASE_SECONDS", "0.001")
+    worker = CloudWorker()
+    outbox = worker.delivery_outbox_dir()
+    outbox.mkdir(parents=True)
+    path = outbox / "task-delivery.json"
+    path.write_text(
+        json.dumps(
+            {
+                "task_id": "task-delivery",
+                "lease_id": "lease-old",
+                "base_result": {},
+                "logs": "",
+                "output_dir": str(tmp_path / "outputs"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    resumed_leases = []
+    delivery_leases = []
+
+    def resume(item):
+        item["lease_id"] = f"lease-{len(resumed_leases) + 1}"
+        resumed_leases.append(item["lease_id"])
+        return item
+
+    def deliver(item):
+        delivery_leases.append(item["lease_id"])
+        if len(delivery_leases) == 1:
+            raise local_worker_module.DeliveryLeaseLost("lease expired")
+
+    monkeypatch.setattr(worker, "resume_delivery_lease", resume)
+    monkeypatch.setattr(worker, "deliver_preserved_result", deliver)
+    monkeypatch.setattr(
+        worker,
+        "task_lease_loop",
+        lambda _task_id, _lease_id, _cancel_event, stop_event: stop_event.wait(),
+    )
+
+    worker.replay_delivery_item(path)
+
+    assert resumed_leases == ["lease-1", "lease-2"]
+    assert delivery_leases == ["lease-1", "lease-2"]
+
+
+def test_artifact_task_lease_conflict_is_detected_through_wrapped_error():
+    api_error = ApiRequestError(
+        "artifact rejected",
+        method="POST",
+        path="/api/worker/tasks/task-delivery/artifacts",
+        attempt=1,
+        elapsed_seconds=0.1,
+        status_code=409,
+        response_body='{"detail":"Task lease does not match"}',
+    )
+    try:
+        raise api_error
+    except ApiRequestError as exc:
+        wrapped = ArtifactUploadFailed("artifact upload failed")
+        wrapped.__cause__ = exc
+
+    assert local_worker_module.delivery_lease_was_lost(wrapped)
+
+
+def test_artifact_metadata_conflict_is_not_mistaken_for_lost_lease():
+    error = ApiRequestError(
+        "artifact rejected",
+        method="POST",
+        path="/api/worker/tasks/task-delivery/artifacts",
+        attempt=1,
+        elapsed_seconds=0.1,
+        status_code=409,
+        response_body='{"detail":"UNIQUE constraint failed: task_artifacts.task_id"}',
+    )
+
+    assert not local_worker_module.delivery_lease_was_lost(error)
 
 
 def test_task_lease_loop_delivers_cancel_request(monkeypatch):
