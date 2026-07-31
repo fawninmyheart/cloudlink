@@ -1096,6 +1096,103 @@ def test_cancelled_disconnected_execution_notifies_original_worker(
     assert task["status"] == "cancelled"
 
 
+def test_worker_startup_reconcile_cancels_missing_execution_and_releases_resources(
+    monkeypatch,
+    tmp_path,
+):
+    client = make_client(monkeypatch, tmp_path)
+    register_worker(client, supported_types=["script_job"])
+    task_id = create_script_task(client)
+    claim = client.post(
+        "/api/worker/claim",
+        headers=worker_headers(),
+        json={"worker_id": "local-worker-1", "supported_types": ["script_job"]},
+    ).json()["task"]
+    expire_task_lock(client, task_id)
+    client.get(f"/api/internal/tasks/{task_id}", headers=internal_headers())
+    client.post(
+        f"/api/internal/tasks/{task_id}/cancel",
+        headers=internal_headers(),
+        json={"reason": "cancelled while WSL was stopped"},
+    )
+
+    response = client.post(
+        "/api/worker/executions/reconcile",
+        headers=worker_headers(),
+        json={"worker_id": "local-worker-1", "active_executions": {}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["reconciled"] == [
+        {"task_id": task_id, "status": "cancelled", "error_code": "cancelled"}
+    ]
+    task = client.get(f"/api/internal/tasks/{task_id}", headers=internal_headers()).json()
+    assert task["status"] == "cancelled"
+    assert task["error"] == "cancelled while WSL was stopped"
+    assert task["lease_id"] is None
+    assert task["resource_reservation"] is None
+    assert task["finished_at"] is not None
+    assert claim["lease_id"]
+
+
+def test_worker_startup_reconcile_preserves_recoverable_outbox_lease(
+    monkeypatch,
+    tmp_path,
+):
+    client = make_client(monkeypatch, tmp_path)
+    register_worker(client, supported_types=["script_job"])
+    task_id = create_script_task(client)
+    claim = client.post(
+        "/api/worker/claim",
+        headers=worker_headers(),
+        json={"worker_id": "local-worker-1", "supported_types": ["script_job"]},
+    ).json()["task"]
+    expire_task_lock(client, task_id)
+    client.get(f"/api/internal/tasks/{task_id}", headers=internal_headers())
+
+    response = client.post(
+        "/api/worker/executions/reconcile",
+        headers=worker_headers(),
+        json={
+            "worker_id": "local-worker-1",
+            "active_executions": {task_id: claim["lease_id"]},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["reconciled"] == []
+    assert response.json()["preserved_task_ids"] == [task_id]
+    task = client.get(f"/api/internal/tasks/{task_id}", headers=internal_headers()).json()
+    assert task["status"] == "disconnected"
+    assert task["resource_reservation"] is not None
+
+
+def test_worker_startup_reconcile_fails_missing_execution_without_cancel(
+    monkeypatch,
+    tmp_path,
+):
+    client = make_client(monkeypatch, tmp_path)
+    register_worker(client, supported_types=["script_job"])
+    task_id = create_script_task(client)
+    client.post(
+        "/api/worker/claim",
+        headers=worker_headers(),
+        json={"worker_id": "local-worker-1", "supported_types": ["script_job"]},
+    )
+
+    response = client.post(
+        "/api/worker/executions/reconcile",
+        headers=worker_headers(),
+        json={"worker_id": "local-worker-1", "active_executions": {}},
+    )
+
+    assert response.status_code == 200
+    task = client.get(f"/api/internal/tasks/{task_id}", headers=internal_headers()).json()
+    assert task["status"] == "failed"
+    assert task["error_code"] == "worker_execution_lost"
+    assert task["resource_reservation"] is None
+
+
 def test_worker_can_renew_lease_and_receive_running_cancel(monkeypatch, tmp_path):
     client = make_client(monkeypatch, tmp_path)
     register_worker(client)

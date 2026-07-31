@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026.07.31.3
+
+- Reconcile execution leases when a worker process starts. Tasks whose local process
+  disappeared across a WSL or service restart now become `cancelled` when cancellation
+  was already requested, or `failed/worker_execution_lost` otherwise, and immediately
+  release their resource reservation.
+- Preserve execution leases referenced by durable completion or artifact-delivery
+  outboxes so completed compute can still resume delivery after restart.
+
 ## 2026.07.31.2
 
 ### Offline Execution Recovery

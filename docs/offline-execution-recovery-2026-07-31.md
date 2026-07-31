@@ -1,7 +1,7 @@
 # Cloudlink 节点断网后的执行恢复
 
 日期：2026-07-31  
-正式版本：`2026.07.31.2`
+正式版本：`2026.07.31.3`
 
 ## 目标
 
@@ -49,6 +49,12 @@ Cloudlink 无法通用地重建任意 Python 进程。
 尚未完成的长任务如需跨进程或跨主机重启继续，任务本身必须实现 checkpoint
 并从 checkpoint 启动。
 
+Worker 每次启动时会先调用 `/api/worker/executions/reconcile`，把 durable
+completion/artifact outbox 中仍可恢复的 lease 告知服务器。其余绑定该节点、
+但本地已经不存在的执行会立即终结：已有取消请求时进入 `cancelled`，否则进入
+`failed/worker_execution_lost`。两种终态都会释放资源预留，之后 Worker 才能
+领取新任务。
+
 ## 运维检查
 
 服务器：
@@ -73,6 +79,6 @@ task <task-id> resumed after worker reconnect
 
 ## 发布要求
 
-服务端和 Worker 必须同时升级到 `2026.07.31.2`。服务端最低 Worker 版本
+服务端和 Worker 必须同时升级到 `2026.07.31.3`。服务端最低 Worker 版本
 同步提升，旧 Worker 在升级前不能领取新任务。正式发布使用正常的完整部署
 流程；不要恢复或运行已删除的临时文件替换脚本。

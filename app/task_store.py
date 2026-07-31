@@ -902,6 +902,70 @@ def resume_task_execution(
     }
 
 
+def reconcile_worker_executions(
+    conn: sqlite3.Connection,
+    worker_id: str,
+    active_executions: Dict[str, str],
+) -> Dict[str, Any]:
+    """Finalize server leases whose local process disappeared across worker startup."""
+    rows = conn.execute(
+        """
+        SELECT id, lease_id, cancel_requested_at, cancel_reason
+        FROM tasks
+        WHERE locked_by = ?
+          AND status IN ('running', 'disconnected')
+        ORDER BY created_at ASC
+        """,
+        (worker_id,),
+    ).fetchall()
+    now = utc_now()
+    reconciled: List[Dict[str, str]] = []
+    preserved: List[str] = []
+    for row in rows:
+        task = dict(row)
+        if active_executions.get(task["id"]) == task.get("lease_id"):
+            preserved.append(task["id"])
+            continue
+
+        if task.get("cancel_requested_at"):
+            status = "cancelled"
+            error_code = "cancelled"
+            error = task.get("cancel_reason") or "Task cancelled by submitter"
+        else:
+            status = "failed"
+            error_code = "worker_execution_lost"
+            error = (
+                "Worker restarted and the original local execution no longer exists; "
+                "the task cannot resume without an application checkpoint"
+            )
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = ?,
+                error = ?,
+                error_code = ?,
+                updated_at = ?,
+                finished_at = ?,
+                locked_until = NULL,
+                lease_id = NULL,
+                resource_reservation = NULL
+            WHERE id = ?
+              AND locked_by = ?
+              AND status IN ('running', 'disconnected')
+            """,
+            (status, error, error_code, now, now, task["id"], worker_id),
+        )
+        set_task_artifact_expiry(conn, task["id"], now)
+        reconciled.append(
+            {"task_id": task["id"], "status": status, "error_code": error_code}
+        )
+    return {
+        "status": "ok",
+        "reconciled": reconciled,
+        "preserved_task_ids": preserved,
+    }
+
+
 def resume_task_delivery(
     conn: sqlite3.Connection,
     task_id: str,

@@ -102,6 +102,48 @@ def test_worker_claim_sends_capacity_state(monkeypatch):
     assert captured["body"]["active_task_count"] == 0
 
 
+def test_worker_startup_reconciliation_preserves_outbox_executions(
+    monkeypatch,
+    tmp_path,
+):
+    configure_worker_env(monkeypatch)
+    monkeypatch.setenv("CLOUDLINK_HOME", str(tmp_path / "cloudlink-home"))
+    worker = CloudWorker()
+    completion = worker.completion_outbox_dir()
+    delivery = worker.delivery_outbox_dir()
+    completion.mkdir(parents=True)
+    delivery.mkdir(parents=True)
+    (completion / "completed.json").write_text(
+        json.dumps({"task_id": "task-complete", "lease_id": "lease-complete"}),
+        encoding="utf-8",
+    )
+    (delivery / "delivery.json").write_text(
+        json.dumps({"task_id": "task-delivery", "lease_id": "lease-delivery"}),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_post_json(path, body):
+        captured["path"] = path
+        captured["body"] = body
+        return {"status": "ok", "reconciled": []}
+
+    monkeypatch.setattr(worker, "post_json", fake_post_json)
+
+    worker.reconcile_startup_executions()
+
+    assert captured == {
+        "path": "/api/worker/executions/reconcile",
+        "body": {
+            "worker_id": "worker-a",
+            "active_executions": {
+                "task-complete": "lease-complete",
+                "task-delivery": "lease-delivery",
+            },
+        },
+    }
+
+
 def test_periodic_gpu_validation_timeout_retains_verified_profile(monkeypatch):
     configure_worker_env(monkeypatch)
     monkeypatch.setenv("CLOUDLINK_GPU_ENABLED", "1")
@@ -311,6 +353,7 @@ def test_worker_claims_tasks_when_delete_request_check_times_out(monkeypatch):
         return None
 
     monkeypatch.setattr(worker, "heartbeat_loop", lambda: None)
+    monkeypatch.setattr(worker, "reconcile_startup_executions", lambda: {})
     monkeypatch.setattr(
         worker.dataset_manager,
         "process_delete_requests",
@@ -348,6 +391,7 @@ def test_worker_runs_dataset_maintenance_on_interval(monkeypatch):
         maintenance_count += 1
 
     monkeypatch.setattr(worker, "heartbeat_loop", lambda: None)
+    monkeypatch.setattr(worker, "reconcile_startup_executions", lambda: {})
     monkeypatch.setattr(worker, "claim_task", fake_claim_task)
     monkeypatch.setattr(
         worker.dataset_manager,
@@ -387,6 +431,7 @@ def test_worker_claim_loop_is_not_blocked_by_dataset_maintenance(monkeypatch):
         return None
 
     monkeypatch.setattr(worker, "heartbeat_loop", lambda: None)
+    monkeypatch.setattr(worker, "reconcile_startup_executions", lambda: {})
     monkeypatch.setattr(worker.dataset_manager, "audit_known_caches", blocking_audit)
     monkeypatch.setattr(worker.dataset_manager, "process_delete_requests", lambda: None)
     monkeypatch.setattr(worker, "claim_task", fake_claim_task)

@@ -478,6 +478,37 @@ class CloudWorker:
             },
         )
 
+    def startup_recoverable_executions(self) -> Dict[str, str]:
+        executions: Dict[str, str] = {}
+        for outbox in (self.completion_outbox_dir(), self.delivery_outbox_dir()):
+            if not outbox.exists():
+                continue
+            for path in sorted(outbox.glob("*.json")):
+                try:
+                    item = json.loads(path.read_text(encoding="utf-8"))
+                    task_id = str(item.get("task_id") or "").strip()
+                    lease_id = str(item.get("lease_id") or "").strip()
+                    if task_id and lease_id:
+                        executions[task_id] = lease_id
+                except Exception as exc:
+                    self.log(f"invalid startup recovery record {path}: {exc}")
+        return executions
+
+    def reconcile_startup_executions(self) -> Dict[str, Any]:
+        response = self.post_json(
+            "/api/worker/executions/reconcile",
+            {
+                "worker_id": self.worker_id,
+                "active_executions": self.startup_recoverable_executions(),
+            },
+        )
+        reconciled = response.get("reconciled") or []
+        if reconciled:
+            self.log(
+                f"reconciled {len(reconciled)} execution(s) lost before worker startup"
+            )
+        return response
+
     def deliver_preserved_result(self, item: Dict[str, Any]) -> None:
         task_id = item["task_id"]
         outbox_path = self.delivery_outbox_dir() / f"{task_id}.json"
@@ -1080,6 +1111,19 @@ class CloudWorker:
             thread.join(timeout=timeout)
 
     def run_forever(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.reconcile_startup_executions()
+                break
+            except (ApiRequestError, TimeoutError, json.JSONDecodeError) as exc:
+                self.last_error = f"startup_execution_reconcile_failed: {exc}"
+                self.log(f"startup execution reconciliation pending: {exc}")
+            except Exception as exc:
+                self.last_error = f"startup_execution_reconcile_error: {exc}"
+                self.log(f"startup execution reconciliation error: {exc}")
+            self.stop_event.wait(self.poll_interval)
+        if self.stop_event.is_set():
+            return
         self.replay_completion_outbox()
         self.replay_delivery_outbox()
         self.log(
