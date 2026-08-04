@@ -52,6 +52,9 @@ class Settings:
     codex_tokens: Dict[str, str]
     allowed_dataset_source_roots: Tuple[str, ...]
     codex_dataset_source_roots: Tuple[str, ...]
+    transfer_source_roots: Tuple[str, ...]
+    result_destination_roots: Tuple[str, ...]
+    legacy_dataset_registration_enabled: bool
     allow_insecure_worker_install: bool
     artifact_retention_seconds: int
     artifact_cleanup_interval_seconds: int
@@ -152,6 +155,11 @@ def get_settings() -> Settings:
             .resolve()
         ),
     )
+    default_transfer_source_roots = (
+        *default_dataset_source_roots,
+        *default_codex_dataset_source_roots,
+    )
+    default_result_destination_roots = (str(Path(data_root) / "results"),)
     worker_secret = _reject_placeholder_secret(
         "WORKER_SECRET",
         os.getenv("WORKER_SECRET", ""),
@@ -225,6 +233,18 @@ def get_settings() -> Settings:
         codex_dataset_source_roots=_path_tuple_env(
             "CLOUDLINK_CODEX_DATASET_SOURCE_ROOTS",
             default_codex_dataset_source_roots,
+        ),
+        transfer_source_roots=_path_tuple_env(
+            "CLOUDLINK_TRANSFER_SOURCE_ROOTS",
+            default_transfer_source_roots,
+        ),
+        result_destination_roots=_path_tuple_env(
+            "CLOUDLINK_RESULT_DESTINATION_ROOTS",
+            default_result_destination_roots,
+        ),
+        legacy_dataset_registration_enabled=_bool_env(
+            "CLOUDLINK_LEGACY_DATASET_REGISTRATION_ENABLED",
+            False,
         ),
         allow_insecure_worker_install=_bool_env(
             "CLOUDLINK_ALLOW_INSECURE_WORKER_INSTALL",

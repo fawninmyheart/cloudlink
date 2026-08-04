@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     error_code TEXT,
     cancel_requested_at TEXT,
     cancel_reason TEXT,
+    result_path TEXT,
     retry_count INTEGER NOT NULL DEFAULT 0
 );
 
@@ -242,6 +243,22 @@ CREATE TABLE IF NOT EXISTS artifact_download_leases (
 
 CREATE INDEX IF NOT EXISTS idx_artifact_download_leases_expiry
 ON artifact_download_leases (artifact_id, expires_at);
+
+CREATE TABLE IF NOT EXISTS transfer_cache_release_requests (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    worker_id TEXT NOT NULL,
+    cache_key TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    error TEXT,
+    UNIQUE(task_id, worker_id, cache_key),
+    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_transfer_cache_release_pending
+ON transfer_cache_release_requests (worker_id, status, created_at);
 """
 
 
@@ -321,6 +338,7 @@ def init_db() -> None:
         ensure_column(conn, "tasks", "error_code", "error_code TEXT")
         ensure_column(conn, "tasks", "cancel_requested_at", "cancel_requested_at TEXT")
         ensure_column(conn, "tasks", "cancel_reason", "cancel_reason TEXT")
+        ensure_column(conn, "tasks", "result_path", "result_path TEXT")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_tasks_submitter

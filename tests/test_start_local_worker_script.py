@@ -120,6 +120,46 @@ def test_start_script_dispatches_print_config_without_printing_secret(tmp_path):
     assert "cached-secret" not in result.stdout
 
 
+def test_start_script_accepts_recover_delivery_arguments(tmp_path):
+    secret_file = tmp_path / "worker_secret"
+    secret_file.write_text("cached-secret\n", encoding="utf-8")
+    env_file = tmp_path / "local_worker.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "CLOUD_API_BASE_URL=https://tasks.example.test",
+                f"CLOUDLINK_WORKER_SECRET_FILE={secret_file}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    env = {**os.environ, "CLOUDLINK_START_WORKER_DRY_RUN": "1"}
+
+    result = subprocess.run(
+        [
+            "bash",
+            "scripts/start_local_worker.sh",
+            "recover-delivery",
+            str(env_file),
+            "--task-id",
+            "task-a",
+            "--lease-id",
+            "lease-a",
+            "--job-dir",
+            "/tmp/job-a",
+        ],
+        cwd=ROOT_DIR,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "Command: recover-delivery" in result.stdout
+    assert "cached-secret" not in result.stdout
+
+
 def test_start_script_has_generic_defaults_for_open_source_release():
     text = (ROOT_DIR / "scripts/start_local_worker.sh").read_text(encoding="utf-8")
     personal_host = "sun" + "fawn"

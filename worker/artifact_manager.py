@@ -40,6 +40,7 @@ class ResultArtifactUploader:
         upload_timeout_seconds: float = 300,
         retry_base_seconds: float = 2,
         retry_max_seconds: float = 60,
+        upload_all: bool = False,
     ) -> None:
         self.api_client = api_client
         self.worker_id = worker_id
@@ -49,6 +50,7 @@ class ResultArtifactUploader:
         self.upload_timeout_seconds = upload_timeout_seconds
         self.retry_base_seconds = retry_base_seconds
         self.retry_max_seconds = retry_max_seconds
+        self.upload_all = upload_all
         self.expected_artifacts = expected_artifacts or []
         self.expected = {
             str(item["path"]): item
@@ -74,6 +76,7 @@ class ResultArtifactUploader:
             upload_timeout_seconds=self.upload_timeout_seconds,
             retry_base_seconds=self.retry_base_seconds,
             retry_max_seconds=self.retry_max_seconds,
+            upload_all=self.upload_all,
         )
 
     def is_expected(self, relative_path: str) -> bool:

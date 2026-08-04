@@ -24,15 +24,30 @@ def read_script(args: argparse.Namespace) -> str:
     raise SystemExit("Provide --script, --script-file, or stdin")
 
 
-def load_input_files(items: List[str]) -> List[Dict[str, str]]:
+def load_inline_input_files(items: List[str]) -> List[Dict[str, str]]:
     files = []
     for item in items:
         if "=" not in item:
-            raise SystemExit("--input-file must be in job/path=local/path form")
+            raise SystemExit("--inline-input-file must be in job/path=local/path form")
         job_path, local_path = item.split("=", 1)
         with open(local_path, "r", encoding="utf-8") as file:
             files.append({"path": job_path, "content": file.read()})
     return files
+
+
+def load_input_paths(items: List[str]) -> List[Dict[str, Any]]:
+    inputs: List[Dict[str, Any]] = []
+    for item in items:
+        if "=" not in item:
+            raise SystemExit("--input-file must be in job/path=server/path form")
+        job_path, source_path = item.split("=", 1)
+        inputs.append(
+            {
+                "path": job_path.strip(),
+                "source_path": str(Path(source_path.strip()).expanduser()),
+            }
+        )
+    return inputs
 
 
 def load_json_file(path: Optional[str]) -> Dict[str, Any]:
@@ -186,13 +201,28 @@ def main() -> int:
         "--input-file",
         action="append",
         default=[],
-        help="Add a text input file as job/path=local/path.",
+        help="Stream a server-side file as job/path=server/path.",
+    )
+    parser.add_argument(
+        "--inline-input-file",
+        action="append",
+        default=[],
+        help="Embed a small text file as job/path=local/path.",
     )
     parser.add_argument(
         "--dataset",
         action="append",
         default=[],
-        help="Reference a managed dataset as dataset_version_id:mount_name.",
+        help="Legacy managed dataset reference; prefer --input-file.",
+    )
+    parser.add_argument(
+        "--result-dir",
+        help="Server-side destination directory for the completed task record and outputs.",
+    )
+    parser.add_argument(
+        "--release-input-cache",
+        action="store_true",
+        help="After --wait reaches a terminal state, ask the worker to release cached inputs.",
     )
     parser.add_argument(
         "--expected-artifact",
@@ -234,7 +264,8 @@ def main() -> int:
         "requirements": args.requirement,
         "args": args.arg,
         "stdin": stdin_text,
-        "input_files": load_input_files(args.input_file),
+        "input_files": load_inline_input_files(args.inline_input_file),
+        "input_paths": load_input_paths(args.input_file),
         "datasets": load_dataset_refs(args.dataset),
         "task_context": load_json_file(args.task_context_file),
         "expected_artifacts": [
@@ -256,6 +287,7 @@ def main() -> int:
                 "title": args.title,
                 "description": args.description,
                 "payload": payload,
+                "result_path": args.result_dir,
             },
         )
     except CloudlinkAuthError as exc:
@@ -275,6 +307,13 @@ def main() -> int:
         )
         if task["status"] in TERMINAL_STATUSES:
             print(json.dumps(task, ensure_ascii=False, indent=2))
+            if args.release_input_cache:
+                released = request_json(
+                    "POST",
+                    f"{base_url}/api/internal/tasks/{task_id}/release-input-cache",
+                    {},
+                )
+                print(json.dumps(released, ensure_ascii=False))
             return 0 if task["status"] == "success" else 1
         time.sleep(args.poll_seconds)
 

@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 def make_client(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLOUDLINK_LEGACY_DATASET_REGISTRATION_ENABLED", "1")
     monkeypatch.setenv("CLOUDLINK_DATABASE_PATH", str(tmp_path / "tasks.db"))
     monkeypatch.setenv("CLOUDLINK_DATA_ROOT", str(tmp_path / "cloudlink-data"))
     monkeypatch.setenv("WORKER_SECRET", "test-secret")

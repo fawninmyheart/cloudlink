@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026.08.04.1
+
+### Transient Inputs And Published Results
+
+- Replaced new managed dataset registration with allowlisted server-path input
+  streaming. Cloudlink hashes sources but does not keep a server-side copy.
+- Added worker-local content-addressed input caching so corrected resubmissions
+  reuse unchanged downloads.
+- Added explicit, task-scoped worker cache release commands.
+- Added allowlisted result destinations. Workers upload into temporary staging;
+  Cloudlink publishes the complete directory and task record before terminalizing
+  the task.
+- Kept historical managed datasets available for migration while disabling new
+  registrations by default.
+- Raised both CPU and GPU minimum worker versions to `2026.08.04.1`.
+
+## 2026.07.30.1
+
+### Persistent Artifact Delivery
+
+- Persist completed script metadata and output locations before the first
+  artifact upload begins.
+- Keep transient artifact delivery failures pending with capped reconnect
+  backoff instead of reporting the completed computation as failed.
+- Replay pending deliveries after worker restart and resume each artifact from
+  the server-confirmed byte offset.
+- Added a worker-authenticated delivery lease recovery path that cannot revive
+  successful, cancelled, or execution-failed tasks.
+- Added `recover-delivery` for uploading an intact historical job directory
+  without rerunning its script.
+- Raised both CPU and GPU minimum worker versions to `2026.07.30.1`.
+
 ## 2026.07.29.1
 
 ### Reliable Result Delivery

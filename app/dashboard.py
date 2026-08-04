@@ -1535,7 +1535,7 @@ def dashboard_html() -> str:
           meaning: artifact.meaning,
           size_bytes: artifact.size_bytes,
           sha256: artifact.sha256,
-          stored_on_server: artifact.status === "uploaded",
+          stored_on_server: ["uploaded", "published"].includes(artifact.status),
           artifact_id: artifact.id,
         }));
       return resultFiles.concat(artifactFiles);

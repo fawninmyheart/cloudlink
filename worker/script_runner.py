@@ -29,13 +29,26 @@ SAFE_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 class ScriptExecutionTimeout(RuntimeError):
     error_code = "execution_timeout"
 
-    def __init__(self, message: str, timeout_seconds: int) -> None:
+    def __init__(
+        self,
+        message: str,
+        timeout_seconds: int,
+        stdout: str = "",
+        stderr: str = "",
+    ) -> None:
         self.timeout_seconds = timeout_seconds
+        self.stdout = stdout
+        self.stderr = stderr
         super().__init__(message)
 
 
 class ScriptExecutionCancelled(RuntimeError):
     error_code = "cancelled"
+
+    def __init__(self, message: str, stdout: str = "", stderr: str = "") -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        super().__init__(message)
 
 
 def run_script_job(
@@ -47,6 +60,8 @@ def run_script_job(
     dataset_records: Optional[List[Dict[str, Any]]] = None,
     artifact_uploader: Any = None,
     cancel_event: Optional[threading.Event] = None,
+    execution_completed: Any = None,
+    input_path_records: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Dict[str, Any], str]:
     runtime = normalize_runtime(payload.get("runtime", "python-auto"))
     script = payload.get("script")
@@ -63,6 +78,7 @@ def run_script_job(
     entrypoint_path.write_text(script, encoding="utf-8")
 
     write_input_files(job_dir, payload.get("input_files", []))
+    mount_input_paths(job_dir, input_path_records or [])
     write_dataset_manifest(job_dir, dataset_records or [])
     requirements = normalize_requirements_payload(payload.get("requirements", []))
     if runtime == "pytorch-cuda":
@@ -75,14 +91,44 @@ def run_script_job(
     args = normalize_string_list(payload.get("args", []), "args")
     timeout_seconds = bounded_timeout(payload.get("timeout_seconds"))
     command = command_prefix + [str(entrypoint_path)] + args
-    completed = run_process(
-        command,
-        stdin_text=normalize_stdin(payload.get("stdin", "")),
-        timeout_seconds=timeout_seconds,
-        cwd=job_dir,
-        env=build_job_env(job_dir, output_dir, payload.get("env", {}), dataset_env or {}),
-        cancel_event=cancel_event,
-    )
+    try:
+        completed = run_process(
+            command,
+            stdin_text=normalize_stdin(payload.get("stdin", "")),
+            timeout_seconds=timeout_seconds,
+            cwd=job_dir,
+            env=build_job_env(job_dir, output_dir, payload.get("env", {}), dataset_env or {}),
+            cancel_event=cancel_event,
+        )
+    except (ScriptExecutionCancelled, ScriptExecutionTimeout) as exc:
+        stdout = trim_text(exc.stdout)
+        stderr = trim_text(exc.stderr)
+        logs = build_logs(command, -1, stdout, stderr)
+        artifact_manifest = read_artifact_manifest(output_dir)
+        if artifact_manifest and artifact_uploader and hasattr(
+            artifact_uploader, "with_manifest"
+        ):
+            artifact_uploader = artifact_uploader.with_manifest(artifact_manifest)
+        result = {
+            "summary": first_nonempty_line(stdout, stderr) or str(exc),
+            "worker_id": worker_id,
+            "runtime": runtime,
+            "exit_code": -1,
+            "job_dir": str(job_dir),
+            "stdout": stdout,
+            "stderr": stderr,
+            "datasets": dataset_records or [],
+            "input_paths": input_path_records or [],
+            "_delivery_status": (
+                "cancelled" if isinstance(exc, ScriptExecutionCancelled) else "timeout"
+            ),
+            "_delivery_error": str(exc),
+            "_delivery_error_code": exc.error_code,
+        }
+        if execution_completed is not None:
+            execution_completed(result, logs, output_dir, artifact_manifest)
+        result["output_files"] = list_output_files(output_dir, artifact_uploader)
+        raise
 
     stdout = trim_text(completed.stdout)
     stderr = trim_text(completed.stderr)
@@ -98,15 +144,31 @@ def run_script_job(
         "job_dir": str(job_dir),
         "stdout": stdout,
         "stderr": stderr,
-        "output_files": list_output_files(output_dir, artifact_uploader),
         "datasets": dataset_records or [],
+        "input_paths": input_path_records or [],
     }
-
+    if execution_completed is not None:
+        execution_completed(result, logs, output_dir, artifact_manifest)
+    result["output_files"] = list_output_files(output_dir, artifact_uploader)
     if completed.returncode != 0:
         raise RuntimeError(
             f"script_job failed with exit code {completed.returncode}: {stderr[-1000:]}"
         )
     return result, logs
+
+
+def resume_script_job_result(
+    base_result: Dict[str, Any],
+    output_dir: Path,
+    artifact_uploader: Any,
+    artifact_manifest: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    uploader = artifact_uploader
+    if artifact_manifest and hasattr(uploader, "with_manifest"):
+        uploader = uploader.with_manifest(artifact_manifest)
+    result = dict(base_result)
+    result["output_files"] = list_output_files(output_dir, uploader)
+    return result
 
 
 def normalize_runtime(value: Any) -> str:
@@ -183,6 +245,19 @@ def write_dataset_manifest(job_dir: Path, dataset_records: List[Dict[str, Any]])
         json.dumps(dataset_records, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def mount_input_paths(job_dir: Path, records: List[Dict[str, Any]]) -> None:
+    for item in records:
+        relative = safe_relative_path(item.get("path"), "input_paths.path")
+        source = Path(str(item.get("local_path") or ""))
+        if not source.exists():
+            raise FileNotFoundError(f"cached input is missing: {source}")
+        target = job_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() or target.is_symlink():
+            raise ValueError(f"input target already exists: {relative}")
+        target.symlink_to(source, target_is_directory=source.is_dir())
 
 
 def read_artifact_manifest(output_dir: Path) -> Dict[str, Any]:
@@ -267,17 +342,21 @@ def run_process(
     first_communicate = True
     while True:
         if cancel_event and cancel_event.is_set():
-            terminate_process_group(process)
+            stdout, stderr = terminate_process_group(process)
             raise ScriptExecutionCancelled(
-                "Task cancelled by submitter after process tree termination"
+                "Task cancelled by submitter after process tree termination",
+                stdout=stdout,
+                stderr=stderr,
             )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            terminate_process_group(process)
+            stdout, stderr = terminate_process_group(process)
             raise ScriptExecutionTimeout(
                 f"script_job execution exceeded timeout_seconds={timeout_seconds}; "
                 "process tree terminated",
                 timeout_seconds=timeout_seconds,
+                stdout=stdout,
+                stderr=stderr,
             )
         try:
             stdout, stderr = process.communicate(
@@ -367,14 +446,19 @@ def list_output_files(output_dir: Path, artifact_uploader: Any = None) -> List[D
     max_total_bytes = int(os.getenv("CLOUDLINK_OUTPUT_FILES_MAX_TOTAL_BYTES", "800000"))
     used_bytes = 0
     files: List[Dict[str, Any]] = []
+    upload_all = bool(
+        artifact_uploader is not None
+        and getattr(artifact_uploader, "upload_all", False)
+    )
     paths = sorted(path for path in output_dir.rglob("*") if path.is_file())
     for path in paths:
-        if len(files) >= 200:
+        if not upload_all and len(files) >= 200:
             break
         if path.is_file():
             relative_path = str(path.relative_to(output_dir))
             if (
                 relative_path == "cloudlink_artifacts.json"
+                and not upload_all
                 and not is_expected_output(relative_path, artifact_uploader)
             ):
                 continue
@@ -408,7 +492,11 @@ def build_output_file_entry(
         "path": str(path.relative_to(output_dir)),
         "size_bytes": size_bytes,
     }
-    if size_bytes > max_file_bytes or used_bytes + size_bytes > max_total_bytes:
+    force_upload = bool(
+        artifact_uploader is not None
+        and getattr(artifact_uploader, "upload_all", False)
+    )
+    if force_upload or size_bytes > max_file_bytes or used_bytes + size_bytes > max_total_bytes:
         if artifact_uploader is not None:
             return artifact_uploader.upload(path, output_dir)
         entry["content_omitted"] = True

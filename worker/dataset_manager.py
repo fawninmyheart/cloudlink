@@ -202,6 +202,132 @@ class DatasetManager:
             )
         return ResolvedDatasets(env=env, records=records)
 
+    def ensure_input_paths(self, refs: Any) -> List[Dict[str, Any]]:
+        if refs in (None, ""):
+            return []
+        if not isinstance(refs, list):
+            raise ValueError("input_paths must be a list")
+        records = []
+        for item in refs:
+            if not isinstance(item, dict):
+                raise ValueError("input_paths entries must be objects")
+            records.append(self.ensure_one_input_path(item))
+        return records
+
+    def ensure_one_input_path(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        cache_key = str(metadata.get("cache_key") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", cache_key):
+            raise ValueError("input cache_key is invalid")
+        lock_name = f"transfer-{cache_key}"
+        with self._lock_guard:
+            lock = self._dataset_locks.setdefault(lock_name, threading.Lock())
+        with lock:
+            lock_root = self.active_writable_root()
+            with dataset_file_lock(lock_root / "transfers", lock_name):
+                return self._ensure_one_input_path_locked(metadata)
+
+    def _ensure_one_input_path_locked(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        cache_key = str(metadata["cache_key"])
+        filename = safe_filename(str(metadata.get("filename") or "source"))
+        expected_size = int(metadata.get("size_bytes") or 0)
+        for root_spec in self.usable_roots():
+            root = Path(root_spec["path"]).expanduser()
+            cached = root / "transfers" / "archives" / cache_key / filename
+            if (
+                cached.is_file()
+                and cached.stat().st_size == expected_size
+                and file_sha256(cached) == metadata.get("checksum_sha256")
+            ):
+                return self.input_path_record(metadata, root, cached)
+
+        root = self.active_writable_root()
+        cache_dir = root / "transfers" / "archives" / cache_key
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cached = cache_dir / filename
+        tmp = cache_dir / f".{filename}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            self.api_client.download_to_path(
+                metadata["download_url"],
+                tmp,
+                timeout=self.download_timeout_seconds,
+                retries=self.download_retries,
+            )
+            if tmp.stat().st_size != expected_size:
+                raise ValueError("downloaded input size does not match submission metadata")
+            if file_sha256(tmp) != metadata.get("checksum_sha256"):
+                raise ValueError("downloaded input checksum does not match submission metadata")
+            tmp.replace(cached)
+        finally:
+            tmp.unlink(missing_ok=True)
+        atomic_write_json(
+            cache_dir / "metadata.json",
+            {
+                "cache_key": cache_key,
+                "filename": filename,
+                "size_bytes": expected_size,
+                "checksum_sha256": metadata.get("checksum_sha256"),
+                "last_used_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        return self.input_path_record(metadata, root, cached)
+
+    def input_path_record(
+        self,
+        metadata: Dict[str, Any],
+        root: Path,
+        cached: Path,
+    ) -> Dict[str, Any]:
+        local_path = cached
+        if metadata.get("extract_required"):
+            extract_metadata = {
+                **metadata,
+                "id": f"transfer-{metadata['cache_key']}",
+            }
+            local_path = self.ensure_extracted(root / "transfers", cached, extract_metadata)
+        marker = cached.parent / "metadata.json"
+        marker_data = {
+            "cache_key": metadata["cache_key"],
+            "filename": cached.name,
+            "size_bytes": cached.stat().st_size,
+            "checksum_sha256": metadata.get("checksum_sha256"),
+            "last_used_at": datetime.now(timezone.utc).isoformat(),
+        }
+        atomic_write_json(marker, marker_data)
+        return {
+            "id": metadata["id"],
+            "cache_key": metadata["cache_key"],
+            "path": metadata["path"],
+            "local_path": str(local_path),
+            "size_bytes": cached.stat().st_size,
+            "extract_required": bool(metadata.get("extract_required")),
+        }
+
+    def process_input_cache_release_requests(self) -> None:
+        response = self.api_client.get_json(
+            f"/api/worker/input-cache/release-requests?worker_id={self.worker_id}",
+            retries=0,
+        )
+        for request in response.get("requests", []):
+            self.release_input_cache(str(request["cache_key"]))
+            self.api_client.post_json(
+                f"/api/worker/input-cache/release-requests/{request['id']}/complete",
+                {"worker_id": self.worker_id},
+                retries=0,
+            )
+
+    def release_input_cache(self, cache_key: str) -> None:
+        if not re.fullmatch(r"[0-9a-f]{64}", cache_key):
+            raise ValueError("input cache_key is invalid")
+        for root_spec in self.all_roots():
+            root = Path(root_spec["path"]).expanduser()
+            for relative in (
+                Path("transfers") / "archives" / cache_key,
+                Path("transfers") / "extracted" / f"transfer-{cache_key}",
+            ):
+                target = root / relative
+                if target.exists():
+                    shutil.rmtree(target)
+
     def fetch_metadata(self, dataset_version_id: str) -> Dict[str, Any]:
         return self.api_client.get_json(
             f"/api/worker/datasets/{dataset_version_id}"

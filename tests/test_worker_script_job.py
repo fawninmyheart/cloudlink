@@ -121,6 +121,173 @@ def test_script_job_uploads_large_outputs_with_artifact_uploader(monkeypatch, tm
     assert "content" not in result["output_files"][0]
 
 
+def test_script_job_persists_completion_before_artifact_upload(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("CLOUDLINK_JOB_ROOT", str(tmp_path / "jobs"))
+    monkeypatch.setenv("CLOUDLINK_OUTPUT_FILE_MAX_BYTES", "5")
+    monkeypatch.setattr(
+        "worker.script_runner.ensure_python_auto_runtime",
+        lambda requirements: sys.executable,
+    )
+    events = []
+
+    class FailingUploader:
+        def upload(self, _path, _output_dir):
+            events.append("upload")
+            raise RuntimeError("network disconnected")
+
+    def execution_completed(result, logs, output_dir, manifest):
+        events.append("persist")
+        assert result["exit_code"] == 0
+        assert "output_files" not in result
+        assert "exit_code=0" in logs
+        assert output_dir.is_dir()
+        assert manifest == {}
+
+    with pytest.raises(RuntimeError, match="network disconnected"):
+        run_script_job(
+            {
+                "script": (
+                    "from pathlib import Path\n"
+                    "Path('outputs/big.bin').write_bytes(b'abcdef')\n"
+                )
+            },
+            "worker-a",
+            task_id="task-persist-first",
+            artifact_uploader=FailingUploader(),
+            execution_completed=execution_completed,
+        )
+
+    assert events == ["persist", "upload"]
+
+
+def test_failed_script_uploads_generated_outputs_before_raising(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLOUDLINK_JOB_ROOT", str(tmp_path / "jobs"))
+    monkeypatch.setattr(
+        "worker.script_runner.ensure_python_auto_runtime",
+        lambda requirements: sys.executable,
+    )
+    uploaded = []
+    persisted = []
+
+    class UploadAll:
+        upload_all = True
+
+        def upload(self, path, output_dir):
+            uploaded.append(str(path.relative_to(output_dir)))
+            return {
+                "path": str(path.relative_to(output_dir)),
+                "size_bytes": path.stat().st_size,
+                "artifact_id": f"artifact-{len(uploaded)}",
+            }
+
+    with pytest.raises(RuntimeError, match="exit code 3"):
+        run_script_job(
+            {
+                "script": (
+                    "from pathlib import Path\n"
+                    "Path('outputs/diagnostic.txt').write_text('partial result')\n"
+                    "raise SystemExit(3)\n"
+                )
+            },
+            "worker-a",
+            task_id="task-failed-results",
+            artifact_uploader=UploadAll(),
+            execution_completed=lambda result, *_args: persisted.append(result),
+        )
+
+    assert persisted[0]["exit_code"] == 3
+    assert uploaded == ["diagnostic.txt"]
+
+
+def test_timed_out_script_uploads_outputs_written_before_termination(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("CLOUDLINK_JOB_ROOT", str(tmp_path / "jobs"))
+    monkeypatch.setattr(
+        "worker.script_runner.ensure_python_auto_runtime",
+        lambda requirements: sys.executable,
+    )
+    uploaded = []
+    persisted = []
+
+    class UploadAll:
+        upload_all = True
+
+        def upload(self, path, output_dir):
+            relative = str(path.relative_to(output_dir))
+            uploaded.append(relative)
+            return {
+                "path": relative,
+                "size_bytes": path.stat().st_size,
+                "artifact_id": "artifact-timeout",
+            }
+
+    def fake_run_process(_command, **kwargs):
+        (kwargs["cwd"] / "outputs" / "progress.json").write_text("{}")
+        raise ScriptExecutionTimeout(
+            "execution timed out",
+            timeout_seconds=5,
+            stdout="partial stdout",
+        )
+
+    monkeypatch.setattr("worker.script_runner.run_process", fake_run_process)
+
+    with pytest.raises(ScriptExecutionTimeout):
+        run_script_job(
+            {"script": "print('unreached')"},
+            "worker-a",
+            task_id="task-timeout-results",
+            artifact_uploader=UploadAll(),
+            execution_completed=lambda result, *_args: persisted.append(result),
+        )
+
+    assert persisted[0]["_delivery_status"] == "timeout"
+    assert persisted[0]["_delivery_error_code"] == "execution_timeout"
+    assert uploaded == ["progress.json"]
+
+
+def test_result_directory_upload_is_not_limited_to_200_files(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLOUDLINK_JOB_ROOT", str(tmp_path / "jobs"))
+    monkeypatch.setattr(
+        "worker.script_runner.ensure_python_auto_runtime",
+        lambda requirements: sys.executable,
+    )
+    uploaded = []
+
+    class UploadAll:
+        upload_all = True
+
+        def upload(self, path, output_dir):
+            relative = str(path.relative_to(output_dir))
+            uploaded.append(relative)
+            return {
+                "path": relative,
+                "size_bytes": path.stat().st_size,
+                "artifact_id": f"artifact-{len(uploaded)}",
+            }
+
+    result, _logs = run_script_job(
+        {
+            "script": (
+                "from pathlib import Path\n"
+                "out = Path('outputs')\n"
+                "[(out / f'{index:03}.txt').write_text(str(index)) "
+                "for index in range(205)]\n"
+            )
+        },
+        "worker-a",
+        task_id="task-many-results",
+        artifact_uploader=UploadAll(),
+    )
+
+    assert len(uploaded) == 205
+    assert len(result["output_files"]) == 205
+
+
 def test_script_job_uses_runtime_artifact_manifest(monkeypatch, tmp_path):
     monkeypatch.setenv("CLOUDLINK_JOB_ROOT", str(tmp_path / "jobs"))
     monkeypatch.setenv("CLOUDLINK_OUTPUT_FILE_MAX_BYTES", "5")

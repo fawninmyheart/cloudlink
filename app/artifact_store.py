@@ -388,7 +388,7 @@ def get_uploaded_artifact_path(conn: sqlite3.Connection, artifact_id: str) -> Pa
     artifact = get_artifact(conn, artifact_id)
     if artifact["status"] in {"purging", "purged"}:
         raise ArtifactGone(artifact_id)
-    if artifact["status"] != "uploaded":
+    if artifact["status"] not in {"uploaded", "published"}:
         raise ArtifactConflict("artifact is not uploaded")
     path = Path(artifact["storage_path"])
     if not path.exists():

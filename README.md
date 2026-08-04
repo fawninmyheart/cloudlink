@@ -62,9 +62,10 @@ The worker avoids shell execution for payloads, but Python code can still read
 files and open network connections allowed by the worker machine.
 
 Cloud-side Codex tokens are intentionally narrower than the internal admin
-secret. They can create/query their own tasks and register reusable datasets
-only from `CLOUDLINK_ALLOWED_DATASET_SOURCE_ROOTS`. Use the internal admin
-secret only in trusted server-side code.
+secret. They can create/query their own tasks and stream files only from
+`CLOUDLINK_TRANSFER_SOURCE_ROOTS` into task workers. Result destinations must
+stay under `CLOUDLINK_RESULT_DESTINATION_ROOTS`. Use the internal admin secret
+only in trusted server-side code.
 
 ## Codex CLI Deployment Runbook
 
@@ -123,6 +124,9 @@ CLOUDLINK_DATA_ROOT=/opt/cloudlink/data
 CLOUDLINK_PUBLIC_BASE_URL=https://tasks.example.com
 CLOUDLINK_ALLOWED_DATASET_SOURCE_ROOTS=/opt/cloudlink/data/imports
 CLOUDLINK_CODEX_DATASET_SOURCE_ROOTS=/tmp/cloudlink-codex-imports
+CLOUDLINK_TRANSFER_SOURCE_ROOTS=/home/ubuntu/research:/data
+CLOUDLINK_RESULT_DESTINATION_ROOTS=/home/ubuntu/research:/data
+CLOUDLINK_LEGACY_DATASET_REGISTRATION_ENABLED=0
 CLOUDLINK_ALLOW_INSECURE_WORKER_INSTALL=0
 WORKER_SECRET=$WORKER_SECRET
 INTERNAL_API_SECRET=$INTERNAL_API_SECRET
@@ -133,8 +137,8 @@ TASK_LOCK_SECONDS=1800
 CLOUDLINK_MAX_PENDING_TASKS=10
 CLOUDLINK_QUEUE_TIMEOUT_SECONDS=21600
 CLOUDLINK_STARVATION_PROTECTION_SECONDS=900
-CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.29.1
-CLOUDLINK_MINIMUM_GPU_WORKER_VERSION=2026.07.29.1
+CLOUDLINK_MINIMUM_WORKER_VERSION=2026.08.04.1
+CLOUDLINK_MINIMUM_GPU_WORKER_VERSION=2026.08.04.1
 WORKER_ONLINE_SECONDS=180
 TASK_ALLOWED_TYPES=echo_test,generate_daily_report,script_job
 WORKER_INSTALL_INVITE_TTL_MINUTES=30
@@ -243,6 +247,9 @@ export CLOUDLINK_DATABASE_PATH=./cloudlink_tasks.db
 export CLOUDLINK_PUBLIC_BASE_URL=https://tasks.example.com
 export CLOUDLINK_ALLOWED_DATASET_SOURCE_ROOTS=./data/imports
 export CLOUDLINK_CODEX_DATASET_SOURCE_ROOTS=/tmp/cloudlink-codex-imports
+export CLOUDLINK_TRANSFER_SOURCE_ROOTS=./data/imports:/tmp/cloudlink-codex-imports
+export CLOUDLINK_RESULT_DESTINATION_ROOTS=./data/results
+export CLOUDLINK_LEGACY_DATASET_REGISTRATION_ENABLED=0
 export CLOUDLINK_ALLOW_INSECURE_WORKER_INSTALL=0
 export WORKER_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 export INTERNAL_API_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
@@ -250,8 +257,8 @@ export CLOUDLINK_CODEX_TOKEN="$(python3 -c 'import secrets; print(secrets.token_
 export ADMIN_USERNAME=admin
 export ADMIN_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
 export TASK_LOCK_SECONDS=1800
-export CLOUDLINK_MINIMUM_WORKER_VERSION=2026.07.29.1
-export CLOUDLINK_MINIMUM_GPU_WORKER_VERSION=2026.07.29.1
+export CLOUDLINK_MINIMUM_WORKER_VERSION=2026.08.04.1
+export CLOUDLINK_MINIMUM_GPU_WORKER_VERSION=2026.08.04.1
 export WORKER_ONLINE_SECONDS=180
 export TASK_ALLOWED_TYPES=echo_test,generate_daily_report,script_job
 export CLOUDLINK_DATA_ROOT=./data
@@ -309,7 +316,11 @@ sudo chown ubuntu:ubuntu /opt/cloudlink/.codex-token
 sudo chmod 600 /opt/cloudlink/.codex-token
 ```
 
-The token can create/query its own tasks, register/list datasets, and query `/api/internal/status` or `/api/internal/queue/status` through `127.0.0.1`. It receives aggregate resource occupancy, but not other submitters' task details. It can register datasets from `CLOUDLINK_ALLOWED_DATASET_SOURCE_ROOTS`, or ask Cloudlink to copy files from `CLOUDLINK_CODEX_DATASET_SOURCE_ROOTS` into trusted managed storage. It cannot delete datasets, access worker APIs, or access the admin dashboard.
+The token can create/query its own tasks and query `/api/internal/status` or
+`/api/internal/queue/status` through `127.0.0.1`. It receives aggregate
+resource occupancy, but not other submitters' task details. Input and result
+paths must be inside the configured transfer allowlists. It cannot access
+worker APIs or the admin dashboard.
 
 ## Queue And Scheduling Limits
 
@@ -473,12 +484,22 @@ The local worker does not call Codex CLI. It runs the submitted Python script di
 
 If the payload declares Python requirements, the worker installs missing packages into `CLOUDLINK_PYTHON_AUTO_VENV` only. It does not install packages into system Python or the project `.venv`.
 
-Files written under `outputs/` are returned in the task result. Small text files include `content`; binary files include `content_base64`; larger files are uploaded as temporary result artifacts.
+Files written under `outputs/` are uploaded to a temporary Cloudlink staging
+area. When `result_path` is set, Cloudlink verifies every file, publishes the
+complete result directory, writes `_cloudlink_task.json`, and only then marks
+the task terminal.
 
-## Result Artifacts
+## Result Delivery
 
-Small files under `outputs/` are returned inline in `result.output_files`.
-Large files are uploaded by the worker to `/opt/cloudlink/data/artifacts/tasks/<task_id>/`.
+For new jobs, set a unique server-side result directory under
+`CLOUDLINK_RESULT_DESTINATION_ROOTS`. All files under `outputs/` are uploaded,
+then moved into that directory before the task becomes `success`, `failed`,
+`timeout`, or `cancelled`. The task record is written alongside them as
+`_cloudlink_task.json`.
+
+Jobs without `result_path` retain the legacy behavior: small outputs remain
+inline and large outputs remain temporary artifacts for 24 hours.
+
 Artifact uploads use resumable chunks controlled by `CLOUDLINK_ARTIFACT_CHUNK_BYTES`
 and finish with a server-side size/sha256 check. If a chunk request times out or
 hits a transient server error, the worker queries upload status and continues
@@ -495,93 +516,47 @@ Cloud-side Codex CLI can download uploaded artifacts through:
 
 `GET /api/internal/tasks/<task_id>/artifacts/<artifact_id>/download`
 
-Artifacts are retained for exactly 24 hours after the task reaches a terminal
-state, then automatically purged. Cloudlink is a transfer layer, not an archive.
-Codex CLI must download every result needed for later work into its own project
-directory before the deadline. Manual cleanup in the dashboard runs a dry-run
-preview before deletion; active downloads are protected, partial uploads are
-included, metadata and cleanup audit records remain, and later downloads return
-HTTP `410 Gone`.
+Published result files are outside artifact retention and are never removed by
+Cloudlink cleanup. Legacy temporary artifacts still expire after 24 hours.
 
-## Manage Large Datasets
+## Stream Task Inputs
 
-Cloudlink can maintain server-local data for reuse by local workers. Do not embed large K-line, tick, model, or archive data into a task payload.
-
-Plain server files inside `CLOUDLINK_ALLOWED_DATASET_SOURCE_ROOTS` are managed as
-symlinks. Files generated by cloud-side Codex CLI should instead be written to
-`CLOUDLINK_CODEX_DATASET_SOURCE_ROOTS` such as `/tmp/cloudlink-codex-imports`;
-when Codex submits that path, Cloudlink copies the file into its trusted managed
-data directory as an `owned_file`.
-
-```bash
-python3 - <<'PY'
-import sys
-
-sys.path.insert(0, "/opt/cloudlink/scripts")
-from cloudlink_client import request_json
-
-body = {
-    "name": "example-prices",
-    "version": "2024-v1",
-    "title": "Example price CSV",
-    "description": "Codex-generated CSV copied into Cloudlink managed data.",
-    "source_kind": "symlink_file",
-    "source_path": "/tmp/cloudlink-codex-imports/prices.csv",
-    "content_type": "text/csv",
-    "manifest": {"schema": ["timestamp", "open", "high", "low", "close", "volume"]},
-}
-print(request_json("POST", "/api/internal/datasets", body))
-PY
-```
-
-Archives are moved into Cloudlink ownership:
-
-```json
-{
-  "source_kind": "owned_archive",
-  "source_path": "/tmp/klines.zip",
-  "archive_format": "zip",
-  "extract_required": true
-}
-```
-
-Reference a managed dataset from a script job:
+Do not register or copy large inputs into Cloudlink storage. Submit the existing
+server-side path and the relative path the script should see:
 
 ```bash
 scripts/submit_local_script_job.py \
   --script-file /tmp/analyze.py \
-  --dataset <dataset_version_id>:klines \
+  --input-file inputs/klines.csv=/data/btcusdt/klines.csv \
+  --result-dir /data/btcusdt/results/run-20260804-001 \
   --wait
 ```
+
+`CLOUDLINK_TRANSFER_SOURCE_ROOTS` must include `/data/btcusdt`, and
+`CLOUDLINK_RESULT_DESTINATION_ROOTS` must include `/data/btcusdt/results`.
+Cloudlink hashes the source at submission, streams it directly to the worker,
+and does not create a server-side data copy. Directories must be submitted as
+an archive file.
+
+The worker caches the downloaded file by content hash and mounts it into each
+job directory. Failed jobs can therefore be fixed and resubmitted without
+downloading unchanged inputs again. After Codex has read the final result,
+release those cached inputs explicitly:
+
+```bash
+scripts/release_task_input_cache.py <task-id>
+```
+
+The worker processes the release command during maintenance and removes only
+the matching transient cache. Historical managed datasets remain readable for
+old tasks. New registration through Codex tokens is disabled unless
+`CLOUDLINK_LEGACY_DATASET_REGISTRATION_ENABLED=1` is deliberately set.
 
 `--timeout` accepts long-running model jobs up to the worker's configured
 maximum, which defaults to one year. With `--wait`, the command waits for the
 task timeout plus five minutes unless `--wait-timeout-seconds` is set
 explicitly. For multi-day jobs, omitting `--wait` and polling the task is often
 more practical.
-
-The worker exposes the local path to the script:
-
-```python
-import os
-from pathlib import Path
-
-klines_path = Path(os.environ["CLOUDLINK_DATASET_KLINES"])
-```
-
-The dashboard shows server-managed datasets and which workers have cached or
-extracted them. For `owned_file` and `owned_archive`, the dashboard can release
-only Cloudlink's managed server copy while retaining metadata and worker caches.
-The original source path and all worker files are never deleted by this action.
-After release, downloads return `410 Gone`, and new tasks are accepted only when
-one online schedulable worker has verified matching caches for every released
-dataset and enough runtime/resources. Only such a worker may claim the task. If
-the last eligible cache holder goes offline while the task is pending, the task
-fails with `dataset_became_unavailable` instead of waiting for queue timeout.
-
-Full dataset deletion removes only Cloudlink symlinks for `symlink_file`; it
-removes real Cloudlink-owned files/archives for owned kinds. Worker-local cache
-deletion removes both downloaded archives and extracted directories.
 
 On the cloud server:
 

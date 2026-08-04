@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tarfile
 import threading
@@ -25,6 +26,8 @@ class FakeApiClient:
         self.cache_rows = []
 
     def get_json(self, path, **_kwargs):
+        if path == "/api/worker/input-cache/release-requests?worker_id=local-worker-a":
+            return {"requests": []}
         if path == f"/api/worker/datasets/{self.metadata['id']}?worker_id=local-worker-a":
             return self.metadata
         if path == "/api/worker/datasets/caches?worker_id=local-worker-a":
@@ -92,6 +95,34 @@ def test_dataset_manager_downloads_extracts_and_reuses_archive(tmp_path, monkeyp
     assert len(api_client.reports) == report_count + 1
     assert api_client.reports[-1][1]["status"] == "extracted"
 
+
+def test_transient_input_is_downloaded_reused_and_released(tmp_path):
+    payload = b"large direct input"
+    cache_key = hashlib.sha256(b"identity").hexdigest()
+    metadata = {
+        "id": "input-a",
+        "cache_key": cache_key,
+        "filename": "input.bin",
+        "size_bytes": len(payload),
+        "checksum_sha256": hashlib.sha256(payload).hexdigest(),
+        "path": "inputs/input.bin",
+        "download_url": "/api/worker/tasks/task-a/inputs/input-a/download",
+        "extract_required": False,
+    }
+    manager, api_client = make_manager(
+        tmp_path,
+        {"id": "unused", "download_url": metadata["download_url"]},
+        payload,
+    )
+
+    first = manager.ensure_input_paths([metadata])[0]
+    second = manager.ensure_input_paths([metadata])[0]
+
+    assert Path(first["local_path"]).read_bytes() == payload
+    assert second["local_path"] == first["local_path"]
+    assert api_client.downloads == [metadata["download_url"]]
+    manager.release_input_cache(cache_key)
+    assert not Path(first["local_path"]).exists()
 
 def test_concurrent_first_download_of_same_dataset_is_serialized(tmp_path):
     payload = b"shared dataset payload"

@@ -78,6 +78,7 @@ from app.task_store import (
     queue_status,
     register_worker,
     renew_task_lease,
+    resume_task_delivery,
     report_failed,
     report_success,
     task_summary,
@@ -85,6 +86,16 @@ from app.task_store import (
     update_worker_concurrency,
     update_worker_settings,
     verify_worker_secret,
+)
+from app.transfer_store import (
+    TransferConflict,
+    TransferNotFound,
+    complete_cache_release,
+    normalize_input_paths,
+    normalize_result_path,
+    pending_cache_releases,
+    request_task_cache_release,
+    task_input_source,
 )
 from app.storage_cleanup import (
     StorageObjectGone,
@@ -169,6 +180,7 @@ class CreateTaskRequest(BaseModel):
     description: str = ""
     submitter_id: Optional[str] = None
     group_id: Optional[str] = None
+    result_path: Optional[str] = None
 
 
 class CancelTaskRequest(BaseModel):
@@ -201,6 +213,16 @@ class FailedRequest(BaseModel):
 class TaskLeaseRequest(BaseModel):
     worker_id: str = Field(min_length=1)
     lease_id: str = Field(min_length=1)
+
+
+class ResumeDeliveryRequest(BaseModel):
+    worker_id: str = Field(min_length=1)
+    previous_lease_id: str = Field(min_length=1)
+
+
+class CompleteCacheReleaseRequest(BaseModel):
+    worker_id: str = Field(min_length=1)
+    error: Optional[str] = None
 
 
 class RegisterWorkerRequest(BaseModel):
@@ -443,7 +465,12 @@ def map_store_error(error: Exception) -> HTTPException:
         return HTTPException(status_code=404, detail="Dataset not found")
     if isinstance(error, WorkerNotRegistered):
         return HTTPException(status_code=403, detail="Worker is not registered")
-    if isinstance(error, (TaskConflict, ArtifactConflict, DatasetConflict)):
+    if isinstance(error, TransferNotFound):
+        return HTTPException(status_code=404, detail="Transfer not found")
+    if isinstance(
+        error,
+        (TaskConflict, ArtifactConflict, DatasetConflict, TransferConflict),
+    ):
         return HTTPException(status_code=409, detail=str(error))
     if isinstance(error, ResourceUnsatisfiable):
         return HTTPException(status_code=422, detail=error.detail)
@@ -975,10 +1002,20 @@ def api_create_task(
     if body.type not in settings.allowed_task_types:
         raise HTTPException(status_code=400, detail="Unsupported task type")
     try:
+        payload = dict(body.payload)
+        if payload.get("input_paths"):
+            payload["input_paths"] = normalize_input_paths(
+                payload.get("input_paths"),
+                settings.transfer_source_roots,
+            )
+        result_path = normalize_result_path(
+            body.result_path,
+            settings.result_destination_roots,
+        )
         task = create_task(
             conn,
             body.type,
-            body.payload,
+            payload,
             body.title,
             body.description,
             submitter_id=(
@@ -987,6 +1024,7 @@ def api_create_task(
                 else body.submitter_id
             ),
             group_id=body.group_id,
+            result_path=result_path,
         )
     except Exception as exc:
         raise map_store_error(exc) from exc
@@ -998,6 +1036,7 @@ def api_create_task(
         "description": task["description"],
         "submitter_id": task["submitter_id"],
         "group_id": task["group_id"],
+        "result_path": task["result_path"],
         "created_at": task["created_at"],
         "resource_status": queue_status(conn),
     }
@@ -1052,6 +1091,25 @@ def api_cancel_task(
             submitter_filter_for_auth(auth),
             reason=body.reason,
         )
+    except Exception as exc:
+        raise map_store_error(exc) from exc
+
+
+@app.post("/api/internal/tasks/{task_id}/release-input-cache")
+def api_release_task_input_cache(
+    task_id: str,
+    auth: AuthContext = Depends(require_internal_or_codex_auth),
+    conn: Connection = Depends(get_connection),
+) -> Dict[str, Any]:
+    try:
+        task = get_task_for_submitter(
+            conn,
+            task_id,
+            submitter_filter_for_auth(auth),
+        )
+        if task["status"] not in {"success", "failed", "timeout", "cancelled"}:
+            raise TransferConflict("input cache can be released only after task completion")
+        return request_task_cache_release(conn, task)
     except Exception as exc:
         raise map_store_error(exc) from exc
 
@@ -1111,6 +1169,14 @@ def api_register_dataset(
     conn: Connection = Depends(get_connection),
 ) -> Dict[str, Any]:
     settings = get_settings()
+    if auth.kind == "codex" and not settings.legacy_dataset_registration_enabled:
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                "Managed dataset registration is disabled; submit server paths "
+                "through script_job payload.input_paths instead"
+            ),
+        )
     source_kind = body.source_kind
     copy_source = False
     if auth.kind == "codex":
@@ -1187,6 +1253,69 @@ def api_claim_task(
     except Exception as exc:
         raise map_store_error(exc) from exc
     return {"task": task}
+
+
+@app.get(
+    "/api/worker/tasks/{task_id}/inputs/{input_id}/download",
+    dependencies=[Depends(require_worker_auth)],
+)
+def api_worker_download_task_input(
+    task_id: str,
+    input_id: str,
+    worker_id: str,
+    lease_id: str,
+    worker_token: str = Depends(require_worker_auth),
+    conn: Connection = Depends(get_connection),
+) -> FileResponse:
+    try:
+        get_worker_for_api(conn, worker_id, worker_token)
+        task = assert_task_owned_by_worker(conn, task_id, worker_id, lease_id)
+        source = task_input_source(task, input_id)
+    except Exception as exc:
+        raise map_store_error(exc) from exc
+    return FileResponse(
+        source,
+        media_type="application/octet-stream",
+        filename=source.name,
+    )
+
+
+@app.get(
+    "/api/worker/input-cache/release-requests",
+    dependencies=[Depends(require_worker_auth)],
+)
+def api_worker_input_cache_release_requests(
+    worker_id: str,
+    worker_token: str = Depends(require_worker_auth),
+    conn: Connection = Depends(get_connection),
+) -> Dict[str, Any]:
+    try:
+        get_worker_for_api(conn, worker_id, worker_token)
+        return {"requests": pending_cache_releases(conn, worker_id)}
+    except Exception as exc:
+        raise map_store_error(exc) from exc
+
+
+@app.post(
+    "/api/worker/input-cache/release-requests/{request_id}/complete",
+    dependencies=[Depends(require_worker_auth)],
+)
+def api_worker_complete_input_cache_release(
+    request_id: str,
+    body: CompleteCacheReleaseRequest,
+    worker_token: str = Depends(require_worker_auth),
+    conn: Connection = Depends(get_connection),
+) -> Dict[str, Any]:
+    try:
+        get_worker_for_api(conn, body.worker_id, worker_token)
+        return complete_cache_release(
+            conn,
+            request_id,
+            body.worker_id,
+            error=body.error,
+        )
+    except Exception as exc:
+        raise map_store_error(exc) from exc
 
 
 @app.post("/api/worker/heartbeat", dependencies=[Depends(require_worker_auth)])
@@ -1643,6 +1772,28 @@ def api_renew_task_lease(
             task_id,
             body.worker_id,
             body.lease_id,
+        )
+    except Exception as exc:
+        raise map_store_error(exc) from exc
+
+
+@app.post(
+    "/api/worker/tasks/{task_id}/delivery/resume",
+    dependencies=[Depends(require_worker_auth)],
+)
+def api_resume_task_delivery(
+    task_id: str,
+    body: ResumeDeliveryRequest,
+    worker_token: str = Depends(require_worker_auth),
+    conn: Connection = Depends(get_connection),
+) -> Dict[str, Any]:
+    try:
+        get_worker_for_api(conn, body.worker_id, worker_token)
+        return resume_task_delivery(
+            conn,
+            task_id,
+            body.worker_id,
+            body.previous_lease_id,
         )
     except Exception as exc:
         raise map_store_error(exc) from exc

@@ -5,6 +5,7 @@ import pytest
 
 from scripts.submit_local_script_job import (
     build_resource_request,
+    load_input_paths,
     resolve_task_timeout,
     resolve_wait_timeout,
 )
@@ -115,3 +116,12 @@ def test_wait_timeout_rejects_non_positive_value():
 
     with pytest.raises(SystemExit, match="must be positive"):
         resolve_wait_timeout(args, 1800)
+
+
+def test_input_file_builds_server_path_reference(tmp_path):
+    source = tmp_path / "large.bin"
+    refs = load_input_paths([f"inputs/large.bin={source}"])
+
+    assert refs == [
+        {"path": "inputs/large.bin", "source_path": str(source)}
+    ]

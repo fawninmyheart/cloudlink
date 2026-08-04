@@ -2,12 +2,20 @@ import json
 import threading
 from pathlib import Path
 
+import pytest
+
 import worker.local_worker as local_worker_module
 from worker.api_client import ApiRequestError
+from worker.artifact_manager import ArtifactUploadFailed
 from worker.config import WorkerConfig
 from worker.gpu_runtime import GpuRuntimeValidationTimeout
 from worker.local_worker import CloudWorker
 from worker.script_runner import ScriptExecutionTimeout
+
+
+@pytest.fixture(autouse=True)
+def isolate_worker_home(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("CLOUDLINK_HOME", str(tmp_path / "cloudlink-home"))
 
 
 def configure_worker_env(monkeypatch) -> None:
@@ -475,6 +483,7 @@ def test_worker_passes_artifact_uploader_to_script_jobs(monkeypatch):
         "upload_timeout_seconds": 300,
         "retry_base_seconds": 2,
         "retry_max_seconds": 60,
+        "upload_all": False,
     }
 
 
@@ -559,6 +568,121 @@ def test_success_report_timeout_preserves_and_retries_result(monkeypatch, tmp_pa
     assert len(calls) == 2
     assert reported_failed == []
     assert not (worker.completion_outbox_dir() / "task-result.json").exists()
+
+
+def test_artifact_upload_failure_pauses_delivery_without_reporting_task_failed(
+    monkeypatch,
+    tmp_path,
+):
+    configure_worker_env(monkeypatch)
+    monkeypatch.setenv("CLOUDLINK_HOME", str(tmp_path / "cloudlink-home"))
+    worker = CloudWorker()
+    task = {
+        "id": "task-delivery",
+        "type": "script_job",
+        "lease_id": "lease-delivery",
+        "payload": {"script": "print('ok')"},
+    }
+    output_dir = tmp_path / "job" / "outputs"
+    output_dir.mkdir(parents=True)
+    worker.persist_delivery(
+        task,
+        {
+            "worker_id": "worker-a",
+            "runtime": "python-auto",
+            "exit_code": 0,
+            "job_dir": str(output_dir.parent),
+            "stdout": "ok\n",
+            "stderr": "",
+            "datasets": [],
+        },
+        "done",
+        output_dir,
+        {},
+    )
+    reported_failed = []
+    resumed = []
+
+    monkeypatch.setattr(
+        worker,
+        "run_task",
+        lambda _task, _cancel_event: (_ for _ in ()).throw(
+            ArtifactUploadFailed("offline")
+        ),
+    )
+    monkeypatch.setattr(
+        worker,
+        "deliver_preserved_result",
+        lambda item: resumed.append(item),
+    )
+    monkeypatch.setattr(
+        worker,
+        "report_failed",
+        lambda *args, **kwargs: reported_failed.append((args, kwargs)),
+    )
+
+    worker.run_and_report_task(task)
+
+    assert len(resumed) == 1
+    assert resumed[0]["task_id"] == "task-delivery"
+    assert reported_failed == []
+
+
+def test_preserved_failed_delivery_reports_failure_after_upload(monkeypatch, tmp_path):
+    configure_worker_env(monkeypatch)
+    worker = CloudWorker()
+    output_dir = tmp_path / "job" / "outputs"
+    output_dir.mkdir(parents=True)
+    task = {
+        "id": "task-failed-delivery",
+        "type": "script_job",
+        "lease_id": "lease-failed-delivery",
+        "payload": {"script": "raise SystemExit(3)"},
+        "result_path": "/results/task-failed-delivery",
+    }
+    path = worker.persist_delivery(
+        task,
+        {
+            "worker_id": "worker-a",
+            "runtime": "python-auto",
+            "exit_code": 3,
+            "job_dir": str(output_dir.parent),
+            "stdout": "",
+            "stderr": "failed",
+            "datasets": [],
+        },
+        "exit_code=3",
+        output_dir,
+        {},
+    )
+    item = json.loads(path.read_text(encoding="utf-8"))
+    failures = []
+
+    monkeypatch.setattr(
+        local_worker_module,
+        "resume_script_job_result",
+        lambda base_result, *_args: {**base_result, "output_files": []},
+    )
+    monkeypatch.setattr(
+        worker,
+        "report_failed",
+        lambda *args, **kwargs: failures.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        worker,
+        "report_success_reliably",
+        lambda *_args, **_kwargs: pytest.fail("failed delivery reported success"),
+    )
+
+    worker.deliver_preserved_result(item)
+
+    assert len(failures) == 1
+    assert failures[0][0][0:2] == (
+        "task-failed-delivery",
+        "lease-failed-delivery",
+    )
+    assert failures[0][1]["error_code"] == "execution_failed"
+    assert not path.exists()
 
 
 def test_task_lease_loop_delivers_cancel_request(monkeypatch):

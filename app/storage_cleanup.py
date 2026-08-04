@@ -209,7 +209,7 @@ def _artifact_candidates(
         FROM task_artifacts
         JOIN tasks ON tasks.id = task_artifacts.task_id
         WHERE {' AND '.join(where)}
-          AND task_artifacts.status != 'purged'
+          AND task_artifacts.status NOT IN ('published', 'purged')
           AND (
               (task_artifacts.expires_at IS NOT NULL AND task_artifacts.expires_at <= ?)
               OR

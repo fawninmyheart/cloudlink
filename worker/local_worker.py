@@ -13,7 +13,7 @@ import urllib.parse
 
 try:
     from worker.api_client import ApiRequestError, WorkerApiClient
-    from worker.artifact_manager import ResultArtifactUploader
+    from worker.artifact_manager import ArtifactUploadFailed, ResultArtifactUploader
     from worker.config import WorkerConfig, WorkerConfigError, load_worker_config
     from worker.dataset_manager import DatasetManager
     from worker.gpu_runtime import GpuRuntimeValidationTimeout, validate_gpu_runtime
@@ -21,16 +21,24 @@ try:
     from worker.script_runner import (
         ScriptExecutionCancelled,
         ScriptExecutionTimeout,
+        read_artifact_manifest,
+        resume_script_job_result,
         run_script_job,
     )
 except ModuleNotFoundError:  # pragma: no cover - supports direct script execution.
     from api_client import ApiRequestError, WorkerApiClient
-    from artifact_manager import ResultArtifactUploader
+    from artifact_manager import ArtifactUploadFailed, ResultArtifactUploader
     from config import WorkerConfig, WorkerConfigError, load_worker_config
     from dataset_manager import DatasetManager
     from gpu_runtime import GpuRuntimeValidationTimeout, validate_gpu_runtime
     from hardware import collect_worker_profiles
-    from script_runner import ScriptExecutionCancelled, ScriptExecutionTimeout, run_script_job
+    from script_runner import (
+        ScriptExecutionCancelled,
+        ScriptExecutionTimeout,
+        read_artifact_manifest,
+        resume_script_job_result,
+        run_script_job,
+    )
 
 
 class CloudWorker:
@@ -326,6 +334,275 @@ class CloudWorker:
             )
         ).expanduser()
 
+    def delivery_outbox_dir(self) -> Path:
+        return Path(
+            os.getenv(
+                "CLOUDLINK_DELIVERY_OUTBOX",
+                str(
+                    Path(os.getenv("CLOUDLINK_HOME", "~/.cloudlink")).expanduser()
+                    / "delivery-outbox"
+                ),
+            )
+        ).expanduser()
+
+    def persist_delivery(
+        self,
+        task: Dict[str, Any],
+        base_result: Dict[str, Any],
+        logs: str,
+        output_dir: Path,
+        manifest: Optional[Dict[str, Any]],
+    ) -> Path:
+        outbox = self.delivery_outbox_dir()
+        outbox.mkdir(parents=True, exist_ok=True)
+        outbox.chmod(0o700)
+        task_id = task["id"]
+        target = outbox / f"{task_id}.json"
+        tmp = outbox / f".{task_id}.{os.getpid()}.{threading.get_ident()}.tmp"
+        completion_status = str(base_result.get("_delivery_status") or "").strip()
+        if not completion_status:
+            completion_status = (
+                "success" if int(base_result.get("exit_code") or 0) == 0 else "failed"
+            )
+        delivery_error = base_result.get("_delivery_error")
+        if completion_status != "success" and not delivery_error:
+            delivery_error = (
+                f"script_job failed with exit code {base_result.get('exit_code')}: "
+                f"{str(base_result.get('stderr') or '')[-1000:]}"
+            )
+        tmp.write_text(
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "lease_id": task["lease_id"],
+                    "base_result": base_result,
+                    "logs": logs,
+                    "output_dir": str(output_dir),
+                    "expected_artifacts": task["payload"].get("expected_artifacts", []),
+                    "manifest": manifest or {},
+                    "result_path": task.get("result_path"),
+                    "completion_status": completion_status,
+                    "error": delivery_error,
+                    "error_code": base_result.get("_delivery_error_code")
+                    or ("execution_failed" if completion_status == "failed" else None),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        tmp.chmod(0o600)
+        tmp.replace(target)
+        return target
+
+    def delivery_uploader(self, item: Dict[str, Any]) -> ResultArtifactUploader:
+        return ResultArtifactUploader(
+            self.api_client,
+            worker_id=self.worker_id,
+            task_id=item["task_id"],
+            lease_id=item["lease_id"],
+            expected_artifacts=item.get("expected_artifacts", []),
+            manifest=item.get("manifest") or None,
+            upload_retries=self.config.artifact_upload_retries,
+            upload_timeout_seconds=self.config.artifact_upload_timeout_seconds,
+            retry_base_seconds=self.config.artifact_retry_base_seconds,
+            retry_max_seconds=self.config.artifact_retry_max_seconds,
+            upload_all=bool(item.get("result_path")),
+        )
+
+    def resume_delivery_lease(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        response = self.api_client.post_json(
+            f"/api/worker/tasks/{item['task_id']}/delivery/resume",
+            {
+                "worker_id": self.worker_id,
+                "previous_lease_id": item["lease_id"],
+            },
+        )
+        item["lease_id"] = response["lease_id"]
+        path = self.delivery_outbox_dir() / f"{item['task_id']}.json"
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(item, ensure_ascii=False), encoding="utf-8")
+        tmp.chmod(0o600)
+        tmp.replace(path)
+        return item
+
+    def deliver_preserved_result(self, item: Dict[str, Any]) -> None:
+        task_id = item["task_id"]
+        outbox_path = self.delivery_outbox_dir() / f"{task_id}.json"
+        attempt = 0
+        while not self.stop_event.is_set():
+            attempt += 1
+            try:
+                result = resume_script_job_result(
+                    item["base_result"],
+                    Path(item["output_dir"]),
+                    self.delivery_uploader(item),
+                    item.get("manifest") or None,
+                )
+                if item.get("completion_status", "success") != "success":
+                    self.report_failed(
+                        task_id,
+                        item["lease_id"],
+                        item.get("error") or "script_job failed",
+                        item.get("logs") or "",
+                        error_code=item.get("error_code") or "execution_failed",
+                    )
+                else:
+                    self.report_success_reliably(
+                        task_id,
+                        item["lease_id"],
+                        result,
+                        item.get("logs") or "",
+                    )
+                outbox_path.unlink(missing_ok=True)
+                self.log(f"completed preserved result delivery for task {task_id}")
+                return
+            except (ArtifactUploadFailed, ApiRequestError, TimeoutError) as exc:
+                self.last_error = f"artifact_delivery_pending task={task_id}: {exc}"
+                self.log(
+                    f"artifact delivery pending for task {task_id}; "
+                    f"outputs preserved in {item['output_dir']}; will resume: {exc}"
+                )
+            except Exception as exc:
+                self.last_error = f"artifact_delivery_failed task={task_id}: {exc}"
+                self.log(
+                    f"artifact delivery paused for task {task_id}; "
+                    f"outputs preserved in {item['output_dir']}: {exc}"
+                )
+            self.stop_event.wait(
+                min(
+                    self.config.artifact_retry_max_seconds,
+                    self.config.artifact_retry_base_seconds
+                    * (2 ** min(attempt - 1, 6)),
+                )
+            )
+
+    def replay_delivery_item(self, path: Path) -> None:
+        item: Dict[str, Any] = {}
+        lease_stop_event = threading.Event()
+        lease_thread: Optional[threading.Thread] = None
+        try:
+            item = json.loads(path.read_text(encoding="utf-8"))
+            item = self.resume_delivery_lease(item)
+            cancel_event = threading.Event()
+            lease_thread = threading.Thread(
+                target=self.task_lease_loop,
+                args=(
+                    item["task_id"],
+                    item["lease_id"],
+                    cancel_event,
+                    lease_stop_event,
+                ),
+                name=f"cloudlink-delivery-lease-{item['task_id'][:8]}",
+                daemon=True,
+            )
+            lease_thread.start()
+            self.deliver_preserved_result(item)
+        except Exception as exc:
+            self.last_error = f"artifact_delivery_replay_failed file={path.name}: {exc}"
+            self.log(f"preserved artifact delivery still pending in {path}: {exc}")
+        finally:
+            lease_stop_event.set()
+            if lease_thread is not None:
+                lease_thread.join(timeout=1)
+            task_id = item.get("task_id")
+            if task_id:
+                with self.active_tasks_lock:
+                    self.active_tasks.pop(task_id, None)
+
+    def replay_delivery_outbox(self) -> None:
+        outbox = self.delivery_outbox_dir()
+        if not outbox.exists():
+            return
+        for path in sorted(outbox.glob("*.json")):
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+                task_id = item["task_id"]
+            except Exception as exc:
+                self.log(f"invalid preserved artifact delivery {path}: {exc}")
+                continue
+            thread = threading.Thread(
+                target=self.replay_delivery_item,
+                args=(path,),
+                name=f"cloudlink-delivery-{task_id[:8]}",
+                daemon=True,
+            )
+            with self.active_tasks_lock:
+                self.active_tasks[task_id] = thread
+            thread.start()
+
+    def recover_existing_delivery(
+        self,
+        task_id: str,
+        previous_lease_id: str,
+        job_dir: Path,
+    ) -> None:
+        job_dir = job_dir.expanduser().resolve()
+        output_dir = job_dir / "outputs"
+        if not output_dir.is_dir():
+            raise FileNotFoundError(f"output directory does not exist: {output_dir}")
+        response = self.api_client.post_json(
+            f"/api/worker/tasks/{task_id}/delivery/resume",
+            {
+                "worker_id": self.worker_id,
+                "previous_lease_id": previous_lease_id,
+            },
+        )
+        payload = response.get("payload") or {}
+        datasets_path = job_dir / "datasets.json"
+        datasets = []
+        if datasets_path.is_file():
+            datasets = json.loads(datasets_path.read_text(encoding="utf-8"))
+        runtime = str(payload.get("runtime") or "python-auto")
+        if runtime in {"python3-auto", "python3.12-auto"}:
+            runtime = "python-auto"
+        base_result = {
+            "summary": "Recovered completed script outputs without rerunning computation",
+            "worker_id": self.worker_id,
+            "runtime": runtime,
+            "exit_code": 0,
+            "job_dir": str(job_dir),
+            "stdout": "",
+            "stderr": "",
+            "datasets": datasets,
+        }
+        logs = (
+            "Recovered artifact delivery from an existing completed job directory; "
+            "the script was not rerun."
+        )
+        task = {
+            "id": task_id,
+            "lease_id": response["lease_id"],
+            "payload": payload,
+            "result_path": response.get("result_path"),
+        }
+        path = self.persist_delivery(
+            task,
+            base_result,
+            logs,
+            output_dir,
+            read_artifact_manifest(output_dir),
+        )
+        item = json.loads(path.read_text(encoding="utf-8"))
+        cancel_event = threading.Event()
+        lease_stop_event = threading.Event()
+        lease_thread = threading.Thread(
+            target=self.task_lease_loop,
+            args=(
+                task_id,
+                item["lease_id"],
+                cancel_event,
+                lease_stop_event,
+            ),
+            name=f"cloudlink-recovery-lease-{task_id[:8]}",
+            daemon=True,
+        )
+        lease_thread.start()
+        try:
+            self.deliver_preserved_result(item)
+        finally:
+            lease_stop_event.set()
+            lease_thread.join(timeout=1)
+
     def persist_completion(
         self,
         task_id: str,
@@ -443,6 +720,11 @@ class CloudWorker:
             return run_generate_daily_report(payload, self.worker_id)
         if task_type == "script_job":
             datasets = self.dataset_manager.ensure_datasets(payload.get("datasets", []))
+            input_paths = (
+                self.dataset_manager.ensure_input_paths(payload["input_paths"])
+                if payload.get("input_paths")
+                else []
+            )
             artifact_uploader = ResultArtifactUploader(
                 self.api_client,
                 worker_id=self.worker_id,
@@ -454,6 +736,7 @@ class CloudWorker:
                 upload_timeout_seconds=self.config.artifact_upload_timeout_seconds,
                 retry_base_seconds=self.config.artifact_retry_base_seconds,
                 retry_max_seconds=self.config.artifact_retry_max_seconds,
+                upload_all=bool(task.get("result_path")),
             )
             return run_script_job(
                 payload,
@@ -464,6 +747,16 @@ class CloudWorker:
                 dataset_records=datasets.records,
                 artifact_uploader=artifact_uploader,
                 cancel_event=cancel_event,
+                execution_completed=lambda result, logs, output_dir, manifest: (
+                    self.persist_delivery(
+                        task,
+                        result,
+                        logs,
+                        output_dir,
+                        manifest,
+                    )
+                ),
+                input_path_records=input_paths,
             )
         raise ValueError(f"Unsupported task type: {task_type}")
 
@@ -518,6 +811,14 @@ class CloudWorker:
     def run_dataset_maintenance(self) -> None:
         self.audit_dataset_caches_best_effort()
         self.process_delete_requests_best_effort()
+        try:
+            self.dataset_manager.process_input_cache_release_requests()
+        except (ApiRequestError, TimeoutError, json.JSONDecodeError) as exc:
+            self.last_error = str(exc)
+            self.log(f"input cache release check failed: {exc}; continuing")
+        except Exception as exc:
+            self.last_error = str(exc)
+            self.log(f"input cache release error: {exc}; continuing")
 
     def process_maintenance_if_due(self, *, force: bool = False) -> None:
         now = time.time()
@@ -554,11 +855,28 @@ class CloudWorker:
         try:
             result, logs = self.run_task(task, cancel_event)
             self.report_success_reliably(task_id, lease_id, result, logs)
+            self.delivery_outbox_dir().joinpath(f"{task_id}.json").unlink(
+                missing_ok=True
+            )
             if not self.completion_outbox_dir().joinpath(f"{task_id}.json").exists():
                 self.log(f"reported success for task {task_id}")
+        except ArtifactUploadFailed as exc:
+            self.log(
+                f"task {task_id} computation completed; artifact delivery is pending: {exc}"
+            )
+            outbox_path = self.delivery_outbox_dir() / f"{task_id}.json"
+            if not outbox_path.exists():
+                raise
+            item = json.loads(outbox_path.read_text(encoding="utf-8"))
+            self.deliver_preserved_result(item)
         except ScriptExecutionCancelled as exc:
             logs = traceback.format_exc()
             self.log(f"task {task_id} cancelled: {exc}")
+            outbox_path = self.delivery_outbox_dir() / f"{task_id}.json"
+            if outbox_path.exists():
+                item = json.loads(outbox_path.read_text(encoding="utf-8"))
+                self.deliver_preserved_result(item)
+                return
             try:
                 self.report_failed(
                     task_id,
@@ -572,6 +890,11 @@ class CloudWorker:
         except ScriptExecutionTimeout as exc:
             logs = traceback.format_exc()
             self.log(f"task {task_id} execution timed out: {exc}")
+            outbox_path = self.delivery_outbox_dir() / f"{task_id}.json"
+            if outbox_path.exists():
+                item = json.loads(outbox_path.read_text(encoding="utf-8"))
+                self.deliver_preserved_result(item)
+                return
             try:
                 self.report_failed(
                     task_id,
@@ -585,6 +908,11 @@ class CloudWorker:
         except Exception as exc:
             logs = traceback.format_exc()
             self.log(f"task {task_id} failed: {exc}")
+            outbox_path = self.delivery_outbox_dir() / f"{task_id}.json"
+            if outbox_path.exists():
+                item = json.loads(outbox_path.read_text(encoding="utf-8"))
+                self.deliver_preserved_result(item)
+                return
             try:
                 self.report_failed(
                     task_id,
@@ -627,6 +955,7 @@ class CloudWorker:
 
     def run_forever(self) -> None:
         self.replay_completion_outbox()
+        self.replay_delivery_outbox()
         self.log(
             f"worker {self.worker_id} started; supported_types={self.supported_types}"
         )
@@ -851,8 +1180,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "command",
         nargs="?",
         default="start",
-        choices=("start", "doctor", "print-config"),
+        choices=("start", "doctor", "print-config", "recover-delivery"),
     )
+    parser.add_argument("--task-id")
+    parser.add_argument("--lease-id")
+    parser.add_argument("--job-dir")
     return parser.parse_args(argv)
 
 
@@ -871,6 +1203,17 @@ def main(argv: Optional[List[str]] = None) -> None:
             return
         if args.command == "doctor":
             raise SystemExit(run_doctor())
+        if args.command == "recover-delivery":
+            if not args.task_id or not args.lease_id or not args.job_dir:
+                raise SystemExit(
+                    "recover-delivery requires --task-id, --lease-id, and --job-dir"
+                )
+            CloudWorker().recover_existing_delivery(
+                args.task_id,
+                args.lease_id,
+                Path(args.job_dir),
+            )
+            return
         CloudWorker().run_forever()
     except WorkerConfigError as exc:
         print(f"Configuration error: {exc}", flush=True)
