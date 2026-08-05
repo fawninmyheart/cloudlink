@@ -188,6 +188,11 @@ def test_failed_artifact_delivery_can_resume_without_new_task_or_artifact(
     client = make_client(monkeypatch, tmp_path)
     register_worker(client)
     task = claim_script_task(client)
+    claimed_detail = client.get(
+        f"/api/internal/tasks/{task['id']}",
+        headers=internal_headers(),
+    ).json()
+    assert claimed_detail["resource_reservation"] is not None
     content = b"abcdefghij"
     digest = hashlib.sha256(content).hexdigest()
     create = client.post(
@@ -237,12 +242,24 @@ def test_failed_artifact_delivery_can_resume_without_new_task_or_artifact(
         headers=internal_headers(),
     ).json()
     assert task_detail["status"] == "running"
+    assert task_detail["resource_reservation"] is None
+    second_resume = client.post(
+        f"/api/worker/tasks/{task['id']}/delivery/resume",
+        headers=worker_headers(),
+        json={
+            "worker_id": "worker-a",
+            "previous_lease_id": new_lease_id,
+        },
+    )
+    assert second_resume.status_code == 200
+    newest_lease_id = second_resume.json()["lease_id"]
+    assert newest_lease_id != new_lease_id
     retry_create = client.post(
         f"/api/worker/tasks/{task['id']}/artifacts",
         headers=worker_headers(),
         json={
             "worker_id": "worker-a",
-            "lease_id": new_lease_id,
+            "lease_id": newest_lease_id,
             "relative_path": "large.bin",
             "size_bytes": len(content),
             "sha256": digest,

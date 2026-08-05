@@ -39,6 +39,59 @@ except ModuleNotFoundError:  # pragma: no cover - supports direct script executi
         resume_script_job_result,
         run_script_job,
     )
+class DeliveryLeaseLost(Exception):
+    pass
+
+
+DELIVERY_LEASE_CONFLICT_DETAILS = {
+    "Task is already finished",
+    "Task is not running",
+    "Task is not locked by this worker",
+    "Task lease does not match",
+}
+DELIVERY_LEASE_CONFLICT_CODES = {
+    "execution_disconnected",
+    "task_finished",
+    "task_not_running",
+    "task_worker_mismatch",
+    "task_lease_mismatch",
+}
+
+
+def api_error_detail(error: ApiRequestError) -> Tuple[Optional[str], Optional[str]]:
+    try:
+        payload = json.loads(error.response_body or "{}")
+    except json.JSONDecodeError:
+        return None, None
+    detail = payload.get("detail")
+    if isinstance(detail, dict):
+        return detail.get("code"), detail.get("message")
+    if isinstance(detail, str):
+        return None, detail
+    return None, None
+
+
+def delivery_lease_was_lost(error: BaseException) -> bool:
+    current: Optional[BaseException] = error
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ApiRequestError) and current.status_code == 409:
+            code, message = api_error_detail(current)
+            if (
+                code in DELIVERY_LEASE_CONFLICT_CODES
+                or message in DELIVERY_LEASE_CONFLICT_DETAILS
+            ):
+                return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def execution_lease_was_disconnected(error: ApiRequestError) -> bool:
+    if error.status_code != 409:
+        return False
+    code, _message = api_error_detail(error)
+    return code == "execution_disconnected"
 
 
 class CloudWorker:
@@ -65,6 +118,8 @@ class CloudWorker:
         self.stop_event = threading.Event()
         self.active_tasks: Dict[str, threading.Thread] = {}
         self.active_tasks_lock = threading.Lock()
+        self.delivery_threads: Dict[str, threading.Thread] = {}
+        self.delivery_threads_lock = threading.Lock()
         self.maintenance_thread: Optional[threading.Thread] = None
         self.maintenance_lock = threading.Lock()
         self.hardware_profile: Dict[str, Any] = {}
@@ -425,6 +480,50 @@ class CloudWorker:
         tmp.replace(path)
         return item
 
+    def resume_execution_lease(
+        self,
+        task_id: str,
+        lease_id: str,
+    ) -> Dict[str, Any]:
+        return self.post_json(
+            f"/api/worker/tasks/{task_id}/execution/resume",
+            {
+                "worker_id": self.worker_id,
+                "lease_id": lease_id,
+            },
+        )
+
+    def startup_recoverable_executions(self) -> Dict[str, str]:
+        executions: Dict[str, str] = {}
+        for outbox in (self.completion_outbox_dir(), self.delivery_outbox_dir()):
+            if not outbox.exists():
+                continue
+            for path in sorted(outbox.glob("*.json")):
+                try:
+                    item = json.loads(path.read_text(encoding="utf-8"))
+                    task_id = str(item.get("task_id") or "").strip()
+                    lease_id = str(item.get("lease_id") or "").strip()
+                    if task_id and lease_id:
+                        executions[task_id] = lease_id
+                except Exception as exc:
+                    self.log(f"invalid startup recovery record {path}: {exc}")
+        return executions
+
+    def reconcile_startup_executions(self) -> Dict[str, Any]:
+        response = self.post_json(
+            "/api/worker/executions/reconcile",
+            {
+                "worker_id": self.worker_id,
+                "active_executions": self.startup_recoverable_executions(),
+            },
+        )
+        reconciled = response.get("reconciled") or []
+        if reconciled:
+            self.log(
+                f"reconciled {len(reconciled)} execution(s) lost before worker startup"
+            )
+        return response
+
     def deliver_preserved_result(self, item: Dict[str, Any]) -> None:
         task_id = item["task_id"]
         outbox_path = self.delivery_outbox_dir() / f"{task_id}.json"
@@ -457,6 +556,8 @@ class CloudWorker:
                 self.log(f"completed preserved result delivery for task {task_id}")
                 return
             except (ArtifactUploadFailed, ApiRequestError, TimeoutError) as exc:
+                if delivery_lease_was_lost(exc):
+                    raise DeliveryLeaseLost(str(exc)) from exc
                 self.last_error = f"artifact_delivery_pending task={task_id}: {exc}"
                 self.log(
                     f"artifact delivery pending for task {task_id}; "
@@ -478,36 +579,57 @@ class CloudWorker:
 
     def replay_delivery_item(self, path: Path) -> None:
         item: Dict[str, Any] = {}
-        lease_stop_event = threading.Event()
-        lease_thread: Optional[threading.Thread] = None
         try:
             item = json.loads(path.read_text(encoding="utf-8"))
-            item = self.resume_delivery_lease(item)
-            cancel_event = threading.Event()
-            lease_thread = threading.Thread(
-                target=self.task_lease_loop,
-                args=(
-                    item["task_id"],
-                    item["lease_id"],
-                    cancel_event,
-                    lease_stop_event,
-                ),
-                name=f"cloudlink-delivery-lease-{item['task_id'][:8]}",
-                daemon=True,
-            )
-            lease_thread.start()
-            self.deliver_preserved_result(item)
+            attempt = 0
+            while not self.stop_event.is_set():
+                attempt += 1
+                lease_stop_event = threading.Event()
+                lease_thread: Optional[threading.Thread] = None
+                try:
+                    item = self.resume_delivery_lease(item)
+                    cancel_event = threading.Event()
+                    lease_thread = threading.Thread(
+                        target=self.task_lease_loop,
+                        args=(
+                            item["task_id"],
+                            item["lease_id"],
+                            cancel_event,
+                            lease_stop_event,
+                        ),
+                        name=f"cloudlink-delivery-lease-{item['task_id'][:8]}",
+                        daemon=True,
+                    )
+                    lease_thread.start()
+                    self.deliver_preserved_result(item)
+                    return
+                except DeliveryLeaseLost as exc:
+                    self.last_error = (
+                        f"artifact_delivery_lease_lost task={item['task_id']}: {exc}"
+                    )
+                    self.log(
+                        f"artifact delivery lease lost for task {item['task_id']}; "
+                        "requesting a new delivery lease"
+                    )
+                finally:
+                    lease_stop_event.set()
+                    if lease_thread is not None:
+                        lease_thread.join(timeout=1)
+                self.stop_event.wait(
+                    min(
+                        self.config.artifact_retry_max_seconds,
+                        self.config.artifact_retry_base_seconds
+                        * (2 ** min(attempt - 1, 6)),
+                    )
+                )
         except Exception as exc:
             self.last_error = f"artifact_delivery_replay_failed file={path.name}: {exc}"
             self.log(f"preserved artifact delivery still pending in {path}: {exc}")
         finally:
-            lease_stop_event.set()
-            if lease_thread is not None:
-                lease_thread.join(timeout=1)
             task_id = item.get("task_id")
             if task_id:
-                with self.active_tasks_lock:
-                    self.active_tasks.pop(task_id, None)
+                with self.delivery_threads_lock:
+                    self.delivery_threads.pop(task_id, None)
 
     def replay_delivery_outbox(self) -> None:
         outbox = self.delivery_outbox_dir()
@@ -526,8 +648,8 @@ class CloudWorker:
                 name=f"cloudlink-delivery-{task_id[:8]}",
                 daemon=True,
             )
-            with self.active_tasks_lock:
-                self.active_tasks[task_id] = thread
+            with self.delivery_threads_lock:
+                self.delivery_threads[task_id] = thread
             thread.start()
 
     def recover_existing_delivery(
@@ -654,6 +776,23 @@ class CloudWorker:
                     f"success report pending for task {task_id}; "
                     f"result preserved in {outbox_path}; will retry: {exc}"
                 )
+                if execution_lease_was_disconnected(exc):
+                    try:
+                        self.resume_execution_lease(task_id, lease_id)
+                    except ApiRequestError as resume_exc:
+                        if resume_exc.status_code == 409:
+                            return
+                        self.log(
+                            f"success report execution recovery failed for "
+                            f"{task_id}: {resume_exc}; will retry"
+                        )
+                    except Exception as resume_exc:
+                        self.log(
+                            f"success report execution recovery error for "
+                            f"{task_id}: {resume_exc}; will retry"
+                        )
+                    else:
+                        continue
                 if exc.status_code is not None and exc.status_code < 500:
                     return
             except Exception as exc:
@@ -677,12 +816,23 @@ class CloudWorker:
         for path in sorted(outbox.glob("*.json")):
             try:
                 item = json.loads(path.read_text(encoding="utf-8"))
-                self.report_success(
-                    item["task_id"],
-                    item["lease_id"],
-                    item["result"],
-                    item.get("logs") or "",
-                )
+                try:
+                    self.report_success(
+                        item["task_id"],
+                        item["lease_id"],
+                        item["result"],
+                        item.get("logs") or "",
+                    )
+                except ApiRequestError as exc:
+                    if not execution_lease_was_disconnected(exc):
+                        raise
+                    self.resume_execution_lease(item["task_id"], item["lease_id"])
+                    self.report_success(
+                        item["task_id"],
+                        item["lease_id"],
+                        item["result"],
+                        item.get("logs") or "",
+                    )
                 path.unlink(missing_ok=True)
                 self.log(f"replayed preserved success for task {item['task_id']}")
             except Exception as exc:
@@ -706,6 +856,34 @@ class CloudWorker:
         if error_code:
             body["error_code"] = error_code
         self.post_json(f"/api/worker/tasks/{task_id}/failed", body)
+
+    def report_failed_after_reconnect(
+        self,
+        task_id: str,
+        lease_id: str,
+        error: str,
+        logs: str,
+        error_code: Optional[str] = None,
+    ) -> None:
+        try:
+            self.report_failed(
+                task_id,
+                lease_id,
+                error,
+                logs,
+                error_code=error_code,
+            )
+        except ApiRequestError as exc:
+            if not execution_lease_was_disconnected(exc):
+                raise
+            self.resume_execution_lease(task_id, lease_id)
+            self.report_failed(
+                task_id,
+                lease_id,
+                error,
+                logs,
+                error_code=error_code,
+            )
 
     def run_task(
         self,
@@ -780,6 +958,34 @@ class CloudWorker:
                 if response.get("cancel_requested"):
                     cancel_event.set()
             except ApiRequestError as exc:
+                if execution_lease_was_disconnected(exc):
+                    try:
+                        response = self.resume_execution_lease(task_id, lease_id)
+                    except ApiRequestError as resume_exc:
+                        if resume_exc.status_code == 409:
+                            self.log(
+                                f"task {task_id} execution recovery was denied; "
+                                "terminating task"
+                            )
+                            cancel_event.set()
+                            return
+                        self.log(
+                            f"task {task_id} execution recovery failed: "
+                            f"{resume_exc}; will retry"
+                        )
+                        continue
+                    except Exception as resume_exc:
+                        self.log(
+                            f"task {task_id} execution recovery error: "
+                            f"{resume_exc}; will retry"
+                        )
+                        continue
+                    self.log(
+                        f"task {task_id} resumed after worker reconnect"
+                    )
+                    if response.get("cancel_requested"):
+                        cancel_event.set()
+                    continue
                 if exc.status_code == 409:
                     self.log(f"task {task_id} lease was revoked; terminating task")
                     cancel_event.set()
@@ -878,7 +1084,7 @@ class CloudWorker:
                 self.deliver_preserved_result(item)
                 return
             try:
-                self.report_failed(
+                self.report_failed_after_reconnect(
                     task_id,
                     lease_id,
                     str(exc),
@@ -896,7 +1102,7 @@ class CloudWorker:
                 self.deliver_preserved_result(item)
                 return
             try:
-                self.report_failed(
+                self.report_failed_after_reconnect(
                     task_id,
                     lease_id,
                     str(exc),
@@ -914,7 +1120,7 @@ class CloudWorker:
                 self.deliver_preserved_result(item)
                 return
             try:
-                self.report_failed(
+                self.report_failed_after_reconnect(
                     task_id,
                     lease_id,
                     str(exc),
@@ -947,6 +1153,12 @@ class CloudWorker:
         for thread in threads:
             thread.join(timeout=timeout)
 
+    def join_delivery_threads(self, timeout: float = 5) -> None:
+        with self.delivery_threads_lock:
+            threads = list(self.delivery_threads.values())
+        for thread in threads:
+            thread.join(timeout=timeout)
+
     def join_maintenance(self, timeout: float = 2) -> None:
         with self.maintenance_lock:
             thread = self.maintenance_thread
@@ -954,6 +1166,19 @@ class CloudWorker:
             thread.join(timeout=timeout)
 
     def run_forever(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.reconcile_startup_executions()
+                break
+            except (ApiRequestError, TimeoutError, json.JSONDecodeError) as exc:
+                self.last_error = f"startup_execution_reconcile_failed: {exc}"
+                self.log(f"startup execution reconciliation pending: {exc}")
+            except Exception as exc:
+                self.last_error = f"startup_execution_reconcile_error: {exc}"
+                self.log(f"startup execution reconciliation error: {exc}")
+            self.stop_event.wait(self.poll_interval)
+        if self.stop_event.is_set():
+            return
         self.replay_completion_outbox()
         self.replay_delivery_outbox()
         self.log(
@@ -1004,6 +1229,7 @@ class CloudWorker:
             heartbeat_thread.join(timeout=2)
             self.join_maintenance(timeout=2)
             self.join_active_tasks(timeout=2)
+            self.join_delivery_threads(timeout=2)
 
 
 def run_echo_test(payload: Dict[str, Any], worker_id: str) -> Tuple[Dict[str, Any], str]:

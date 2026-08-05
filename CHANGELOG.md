@@ -16,6 +16,41 @@
   registrations by default.
 - Raised both CPU and GPU minimum worker versions to `2026.08.04.1`.
 
+## 2026.07.31.3
+
+- Reconcile execution leases when a worker process starts. Tasks whose local process
+  disappeared across a WSL or service restart now become `cancelled` when cancellation
+  was already requested, or `failed/worker_execution_lost` otherwise, and immediately
+  release their resource reservation.
+- Preserve execution leases referenced by durable completion or artifact-delivery
+  outboxes so completed compute can still resume delivery after restart.
+
+## 2026.07.31.2
+
+### Offline Execution Recovery
+
+- Move expired script execution leases into a nonterminal `disconnected` state
+  while preserving the original worker, lease, and resource reservation.
+- Allow only the original worker and lease to resume execution after network
+  connectivity returns; disconnected work is never reclaimed by another node.
+- Carry cancellation requests across the disconnected interval and terminate
+  only after the original worker receives the request.
+- Recover the execution lease before submitting success, failure, cancellation,
+  or replayed completion reports.
+- Retire the temporary production file-replacement deployment script in favor
+  of the normal versioned deployment path.
+
+## 2026.07.31.1
+
+### Resilient Delivery Lease Recovery
+
+- Keep persistent artifact delivery threads separate from script execution
+  concurrency so a delayed delivery cannot occupy the worker's compute slot.
+- Preserve worker API error response details and detect task-lease conflicts
+  without treating unrelated artifact conflicts as expired leases.
+- Reacquire a delivery-only lease when a long network outage outlives the
+  current lease, then continue artifact upload from server-confirmed state.
+
 ## 2026.07.30.1
 
 ### Persistent Artifact Delivery

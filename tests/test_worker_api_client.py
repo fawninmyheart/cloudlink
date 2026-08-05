@@ -117,6 +117,7 @@ def test_post_json_does_not_retry_auth_failures(monkeypatch):
 
     assert len(attempts) == 1
     assert excinfo.value.status_code == 403
+    assert excinfo.value.response_body == '{"detail":"forbidden"}'
 
 
 def test_probe_json_can_run_without_auth(monkeypatch):

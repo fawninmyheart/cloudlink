@@ -76,9 +76,11 @@ from app.task_store import (
     list_task_summaries,
     list_workers,
     queue_status,
+    reconcile_worker_executions,
     register_worker,
     renew_task_lease,
     resume_task_delivery,
+    resume_task_execution,
     report_failed,
     report_success,
     task_summary,
@@ -223,6 +225,16 @@ class ResumeDeliveryRequest(BaseModel):
 class CompleteCacheReleaseRequest(BaseModel):
     worker_id: str = Field(min_length=1)
     error: Optional[str] = None
+
+
+class ResumeExecutionRequest(BaseModel):
+    worker_id: str = Field(min_length=1)
+    lease_id: str = Field(min_length=1)
+
+
+class ReconcileExecutionsRequest(BaseModel):
+    worker_id: str = Field(min_length=1)
+    active_executions: Dict[str, str] = Field(default_factory=dict)
 
 
 class RegisterWorkerRequest(BaseModel):
@@ -467,10 +479,12 @@ def map_store_error(error: Exception) -> HTTPException:
         return HTTPException(status_code=403, detail="Worker is not registered")
     if isinstance(error, TransferNotFound):
         return HTTPException(status_code=404, detail="Transfer not found")
-    if isinstance(
-        error,
-        (TaskConflict, ArtifactConflict, DatasetConflict, TransferConflict),
-    ):
+    if isinstance(error, TaskConflict):
+        detail: Any = str(error)
+        if error.code:
+            detail = {"code": error.code, "message": str(error)}
+        return HTTPException(status_code=409, detail=detail)
+    if isinstance(error, (ArtifactConflict, DatasetConflict, TransferConflict)):
         return HTTPException(status_code=409, detail=str(error))
     if isinstance(error, ResourceUnsatisfiable):
         return HTTPException(status_code=422, detail=error.detail)
@@ -1794,6 +1808,48 @@ def api_resume_task_delivery(
             task_id,
             body.worker_id,
             body.previous_lease_id,
+        )
+    except Exception as exc:
+        raise map_store_error(exc) from exc
+
+
+@app.post(
+    "/api/worker/tasks/{task_id}/execution/resume",
+    dependencies=[Depends(require_worker_auth)],
+)
+def api_resume_task_execution(
+    task_id: str,
+    body: ResumeExecutionRequest,
+    worker_token: str = Depends(require_worker_auth),
+    conn: Connection = Depends(get_connection),
+) -> Dict[str, Any]:
+    try:
+        get_worker_for_api(conn, body.worker_id, worker_token)
+        return resume_task_execution(
+            conn,
+            task_id,
+            body.worker_id,
+            body.lease_id,
+        )
+    except Exception as exc:
+        raise map_store_error(exc) from exc
+
+
+@app.post(
+    "/api/worker/executions/reconcile",
+    dependencies=[Depends(require_worker_auth)],
+)
+def api_reconcile_worker_executions(
+    body: ReconcileExecutionsRequest,
+    worker_token: str = Depends(require_worker_auth),
+    conn: Connection = Depends(get_connection),
+) -> Dict[str, Any]:
+    try:
+        get_worker_for_api(conn, body.worker_id, worker_token)
+        return reconcile_worker_executions(
+            conn,
+            body.worker_id,
+            body.active_executions,
         )
     except Exception as exc:
         raise map_store_error(exc) from exc
